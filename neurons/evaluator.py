@@ -28,20 +28,20 @@ Usage Examples:
     Basic run:
         $ WALLET_NAME=...
         $ WALLET_HOTKEY=...
-        $ torchrun --standalone --nnodes 1 --nproc_per_node 8 neurons/evaluator.py \\
-            --device cuda \\
-            --netuid 3 \\
-            --wallet.name $WALLET_NAME  \\
+        $ torchrun --standalone --nnodes 1 --nproc_per_node 8 neurons/evaluator.py \
+            --device cuda \
+            --netuid 3 \
+            --wallet.name $WALLET_NAME  \
             --wallet.hotkey $WALLET_HOTKEY
 
     Custom configuration:
-        $ torchrun --standalone --nnodes 1 --nproc_per_node 8 neurons/evaluator.py \\
-            --device cuda \\
-            --netuid 3 \\
-            --wallet.name $WALLET_NAME  \\
-            --wallet.hotkey $WALLET_HOTKEY
-            --tasks "arc_challenge,winogrande" \\
-            --eval_interval 300 \\
+        $ torchrun --standalone --nnodes 1 --nproc_per_node 8 neurons/evaluator.py \
+            --device cuda \
+            --netuid 3 \
+            --wallet.name $WALLET_NAME  \
+            --wallet.hotkey $WALLET_HOTKEY \
+            --tasks "arc_challenge,winogrande" \
+            --eval_interval 300 \
             --custom_eval_path eval 
 
 For additional environment setup, refer to the miner documentation:
@@ -90,29 +90,6 @@ class Evaluator:
     The Evaluator is responsible for automated benchmark evaluation of model checkpoints.
     It continuously monitors for new checkpoints by window number, downloads them, runs a
     comprehensive suite of language model evaluations, and logs results to InfluxDB.
-
-    Key Features:
-        - Automatic checkpoint detection by window number
-        - Multi-task model evaluation
-        - Distributed metrics logging
-        - Progress tracking via grafana
-        - Resource cleanup and management
-
-    Evaluation Flow:
-        1. Monitor blockchain for new checkpoints by window number
-        2. Download and load checkpoint directly when detected
-        3. Run benchmark suite using lm-eval
-        4. Parse and log results
-        5. Clean up resources
-        6. Wait for next checkpoint
-
-    Attributes:
-        config (bt.Config): Configuration object containing CLI arguments
-        netuid (int): Network UID for the subnet
-        model (TitanLlama): The TorchTitan language model being evaluated
-        metrics_logger (MetricsLogger): Logger for InfluxDB metrics
-        last_eval_window (int): Last evaluated window number
-        last_block_number (int): Last processed block number
     """
 
     @staticmethod
@@ -179,8 +156,6 @@ class Evaluator:
             default=None,
             help="Path to the custom evaluation dataset bins for perplexity calculation.",
         )
-
-        # For "local" runs:
         parser.add_argument(
             "--limit",
             type=float,
@@ -214,7 +189,6 @@ class Evaluator:
         bt.subtensor.add_args(parser)
         bt.wallet.add_args(parser)
 
-        parser.parse_args()
         config = bt.config(parser)
         return config
 
@@ -231,64 +205,15 @@ class Evaluator:
         if self.config.trace:
             tplr.trace()
 
+        # Distributed training setup
         self.rank = int(os.getenv("RANK", 0))
         self.world_size = int(os.getenv("WORLD_SIZE", 1))
         self.local_rank = int(os.getenv("LOCAL_RANK", 0))
         self.is_master = self.rank == 0
 
-        # Use constant for default checkpoint directory.
-        self.checkpoint_path: str = (
-            self.config.checkpoint_path or CHECKPOINT_DEFAULT_DIR
-        )
-        os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
-
-        self.netuid = self.config.netuid
-        self.hparams = tplr.load_hparams()
-        tplr.logger.info(
-            f"Loaded hparams: hidden_size={self.hparams.hidden_size}, num_hidden_layers={self.hparams.num_hidden_layers}, num_key_value_heads={self.hparams.num_key_value_heads}"
-        )
-        self.wallet = bt.wallet(config=self.config)
-
-        self.version = self.config.version or tplr.__version__
-
-        # Mock for the comms class
-        self.uid = 1
-        # All ranks need comms for distributed checkpoint loading
-        self.comms = tplr.comms.Comms(
-            wallet=self.wallet,
-            save_location="/tmp",
-            key_prefix="checkpoint",
-            config=self.config,
-            hparams=self.hparams,
-            uid=self.uid,
-        )
-
-        # Only master rank gets buckets and initializes metrics logger
-        if self.is_master:
-            self.buckets = self.comms.get_all_buckets()
-
-            # Initialize metrics logger with consistent patterns
-            self.metrics_logger = tplr.metrics.MetricsLogger(
-                prefix="E",
-                uid=str(self.uid),  # Is this intended to be user or default==1?
-                config=self.config,
-                role="evaluator",
-                group="evaluations",
-                job_type="eval",
-                version=self.version,
-            )
-        else:
-            self.buckets = None
-            self.metrics_logger = NullMetricsLogger()
-
-        # Initialize distributed training if available
         tplr.logger.info(
             f"[Init] rank={self.rank}, world_size={self.world_size}, local_rank={self.local_rank}"
         )
-        if self.world_size < 2:
-            raise ValueError(
-                "Current models require distribution. Use DDP mode for smaller models."
-            )
 
         if self.world_size > 1:
             if not dist.is_initialized():
@@ -300,52 +225,67 @@ class Evaluator:
                     world_size=self.world_size,
                 )
                 torch.cuda.set_device(self.local_rank)
-
-            tplr.logger.info(
-                f"[Init] NCCL process-group ready and GPU selected, {self.rank}"
-            )
             self.device: str = f"cuda:{self.local_rank}"
-
             tplr.logger.info(
                 f"Distributed evaluation: rank {self.rank}/{self.world_size}, "
                 f"local_rank {self.local_rank}, is_master: {self.is_master}"
             )
-        else:  # Single GPU or CPU mode
-            if self.config.device:
-                self.device: str = self.config.device
-            elif torch.cuda.is_available():
-                self.device: str = "cuda:0"  # Use cuda:0 for single GPU
-            else:
-                self.device: str = "cpu"
+        else:
+            self.device = self.config.device
+
         tplr.logger.info(f"[Init] device set → {self.device}")
 
-        # Initialize TorchTitan model using model factory
+        # Bittensor objects
+        self.wallet = bt.wallet(config=self.config)
+        self.netuid = self.config.netuid
+        self.version = self.config.version or tplr.__version__
+        
+        # Model and tokenizer
+        self.hparams = tplr.load_hparams()
         self.model = initialize_torchtitan_model(
             hparams=self.hparams,
             role="evaluator",
             device=self.device,
             world_size=self.world_size,
         )
-
         self.tokenizer = self.hparams.tokenizer
-        # Ensure a pad token exists for loss masking/perplexity
         if getattr(self.tokenizer, "pad_token_id", None) is None:
-            # LLaMA tokenizers typically don't have PAD; use EOS
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
+        # Comms and logging
+        self.uid = 1 # Mock UID
+        self.comms = tplr.comms.Comms(
+            wallet=self.wallet,
+            save_location="/tmp",
+            key_prefix="checkpoint",
+            config=self.config,
+            hparams=self.hparams,
+            uid=self.uid,
+        )
+
+        if self.is_master:
+            self.buckets = self.comms.get_all_buckets()
+            self.metrics_logger = tplr.metrics.MetricsLogger(
+                prefix="E",
+                uid=str(self.uid),
+                config=self.config,
+                role="evaluator",
+                group="evaluations",
+                job_type="eval",
+                version=self.version,
+            )
+        else:
+            self.buckets = None
+            self.metrics_logger = NullMetricsLogger()
+
+        # Evaluation state
         self.last_eval_window = 0
         self.stop_event = asyncio.Event()
         self.last_block_number = 0
         self.eval_counter = 0
-
-        # Track evaluated checkpoints
         self.evaluated_checkpoints = []
+        self.task_list = self.config.tasks.split(",") if self.config.tasks else []
 
-        self.task_list = []
-        if self.config.tasks:
-            self.task_list = self.config.tasks.split(",")
-
-        # potentially sync before exiting init
         if dist.is_available() and dist.is_initialized():
             dist.barrier(device_ids=[self.local_rank])
 
@@ -357,24 +297,11 @@ class Evaluator:
         self.buckets = self.comms.get_all_buckets()
 
     async def load_latest_model(self) -> tuple[bool, int]:
-        """Load and prepare the latest model checkpoint for evaluation.
-
-        This method:
-        1. Uses comms.load_checkpoint for distributed loading
-        2. Verifies checkpoint validity
-        3. Updates internal state trackers
-
-        Returns:
-            Tuple containing:
-            - success (bool): Whether loading succeeded
-            - checkpoint_window (int): Window number of checkpoint
-        """
-        # Get the current window to check against
+        """Load and prepare the latest model checkpoint for evaluation."""
         current_window = (
             self.comms.subtensor.get_current_block() // self.hparams.blocks_per_window
         )
 
-        # Use load_checkpoint which handles distributed loading properly
         success, checkpoint_window = await self.comms.load_checkpoint(
             model=self.model,
             current_window=current_window,
@@ -401,108 +328,10 @@ class Evaluator:
         if self.is_master:
             tplr.logger.info(f"Loaded checkpoint (window={checkpoint_window})")
 
-        # Synchronize all ranks after loading
         if dist.is_available() and dist.is_initialized():
             dist.barrier(device_ids=[self.local_rank])
 
         return (True, checkpoint_window)
-
-    def _run_lm_eval(
-        self,
-        tasks: str,
-        output_dir: str,
-        batch_size: str = "auto",
-        model_args: str | None = None,
-        limit: str | None = None,
-        num_fewshot: int | None = None,
-    ) -> tuple[int, float]:
-        """Run lm-eval benchmark for specified tasks with custom configuration.
-
-        Args:
-            tasks: Comma-separated task list
-            output_dir: Directory to save results
-            model_args: Optional model arguments
-            batch_size: Optional batch size
-            limit: Optional dataset limit
-            num_fewshot: Optional few-shot examples
-
-        Returns:
-            Tuple containing (exit_code, runtime)
-        """
-        default_model_args = [f"pretrained={MODEL_PATH}", f"tokenizer={MODEL_PATH}", "max_length=2048"]
-
-        extra = None
-        device_arg = self.device
-        if self.world_size > 1 and str(self.device).startswith("cuda"):
-            # Harness path for single‑process multi‑GPU sharding (no DDP).
-            # Uses all GPUs in CUDA_VISIBLE_DEVICES.
-            extra = ["parallelize=True", "device_map=auto"]
-
-            # For sharded runs, pass plain 'cuda' so lm‑eval doesn’t pin to ':0'.
-            device_arg = "cuda"
-
-        if extra and model_args is None:
-            model_args = ",".join(default_model_args + extra)
-
-        cmd_parts = [
-            "accelerate launch",
-            "--dynamo_backend inductor",
-            "--multi_gpu",
-            "--mixed_precision bf16",
-            f"--num_processes {self.world_size}",
-            "-m",
-            "lm_eval",
-            "--model hf",
-            f"--model_args {model_args}",
-            f"--tasks {tasks}",
-            f"--device {device_arg}",
-            f"--batch_size {batch_size}",
-            f"--output_path {output_dir}",
-            # '--gen_kwargs "max_gen_toks=2048",
-        ]
-
-        if limit:
-            cmd_parts.append(f"--limit {limit}")
-        if num_fewshot:
-            cmd_parts.append(f"--num_fewshot {num_fewshot}")
-
-        command = " ".join(cmd_parts)
-
-        start_time = tplr.T()
-        tplr.logger.info(f"Running benchmark command: {command}")
-        # TODO: Consider replacing os.system with subprocess.run for better control and error handling.
-        exit_code = os.system(command)
-        benchmark_runtime = tplr.T() - start_time
-
-        return exit_code, benchmark_runtime
-
-    def _load_latest_file(self, eval_results_dir: str) -> dict[str, dict[str, float]]:
-        """Load the latest evaluation results file from the specified directory.
-
-        Args:
-            eval_results_dir: Directory containing evaluation results files
-
-        Returns:
-            Parsed JSON data from the latest results file
-        """
-        output = {}
-
-        try:
-            latest_file = max(
-                [
-                    os.path.join(eval_results_dir, f)
-                    for f in os.listdir(eval_results_dir)
-                ],
-                key=os.path.getctime,
-            )
-            with open(latest_file, "r") as f:
-                output = json.load(f)
-        except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
-            tplr.logger.error(
-                f"Error loading latest evaluation file from {eval_results_dir}: {e}"
-            )
-
-        return output
 
     @decos.async_evaluator_exception_catcher()
     @decos.master_only
@@ -513,17 +342,7 @@ class Evaluator:
         checkpoint_window: int,
         block_number: int,
     ) -> None:
-        """Process results from the lm-eval benchmark.
-
-        Args:
-            task_name: Name of the benchmark task
-            results_dir: Directory containing results
-            global_step: Current global step for logging
-            checkpoint_window: Current window for logging
-            block_number: Current block for logging
-            benchmark_runtime: Runtime of the benchmark
-            exit_code: Exit code of the benchmark command
-        """
+        """Process results from the lm-eval benchmark."""
 
         tplr.logger.info(
             f"Processing metrics for global step {global_step} (block: {block_number}, window: {checkpoint_window})"
@@ -534,9 +353,6 @@ class Evaluator:
             return
 
         for task_name, task_results in results.get("results", {}).items():
-            # We need to try each metric in order until we find one that exists
-            # Also we need to prioritise metrics in order of preference
-            # see: https://github.com/EleutherAI/lm-evaluation-harness/blob/758c5ed891b1ca48acd8d3a0d309a827215796b7/scripts/regression.py#L115
             metric_names = ["acc_norm,none", "acc,none"]
             metric_value = None
             used_metric = None
@@ -583,15 +399,7 @@ class Evaluator:
 
     @decos.async_evaluator_exception_catcher()
     async def _evaluate(self) -> None:
-        """Execute benchmark evaluation on the current model.
-
-        Workflow:
-        1. Save model to temporary location
-        2. Run lm-eval benchmark suite
-        3. Parse results for each task
-        4. Log metrics to InfluxDB
-        5. Clean up temporary files
-        """
+        """Execute benchmark evaluation on the current model."""
         self.comms.commitments = await self.comms.get_commitments()
         self.comms.update_peers_with_buckets()
         start_window = await self.comms.get_start_window(version=self.version)
@@ -603,30 +411,24 @@ class Evaluator:
         (success, checkpoint_window) = await self.load_latest_model()
 
         if not success and self.last_eval_window > 0:
-            # We've already evaluated something and no new checkpoint is available
             tplr.logger.info(
                 f"No new checkpoint to evaluate (last evaluated window: {self.last_eval_window})"
             )
             return
         elif not success and self.last_eval_window == 0:
-            # First run with no checkpoint - use initialized model
             tplr.logger.info(
                 "Using initialized model for evaluation (no checkpoint available)"
             )
             checkpoint_window = 0
             global_step = 0
         else:
-            # I think this is premature
             self.evaluated_checkpoints.append(checkpoint_window)
-            
-            # Calculate global step, ensuring it's a positive integer
             global_step = (
                 max(0, checkpoint_window - start_window)
                 if start_window is not None
                 else checkpoint_window
             )
 
-        # If start_window is not found, default to 0
         if start_window is None:
             if self.is_master:
                 tplr.logger.warning(
@@ -639,8 +441,6 @@ class Evaluator:
                 f"Starting benchmark run at global step {global_step} (checkpoint window: {checkpoint_window})"
             )
 
-        # Run custom perplexity evaluation first. It manages its own model device placement.
-        # This runs on all ranks for distributed evaluation
         self._evaluate_custom(
             global_step=global_step,
             checkpoint_window=checkpoint_window,
@@ -648,185 +448,69 @@ class Evaluator:
         )
 
         if self.task_list:
-            # Only master rank runs lm-eval (command-line tool can't be distributed)
-            # if self.is_master:
-            #     os.makedirs(MODEL_PATH, exist_ok=True)
-
-            # # Convert TorchTitan model to HuggingFace format for lm-eval
-            # try:
-            #     convert_titan_to_hf(
-            #         titan_model=self.model,
-            #         hparams=self.hparams,
-            #         save_path=MODEL_PATH,
-            #         is_master=self.is_master,
-            #     )
-            #     self.hparams.tokenizer.save_pretrained(MODEL_PATH)
-            # except Exception as e:
-            #     tplr.logger.error(
-            #         f"Failed to convert model at step {global_step}: {e}. Skipping evaluation cycle."
-            #     )
-            #     return
-
-            # # Move to cpu to save space
-            # self.model = self.model.to("cpu")
-
-            # All ranks should clear cache
-            tplr.logger.info(f"Clearing GPU cache, {self.local_rank}")
             torch.cuda.empty_cache()
 
+            lm_eval_model = TitanLlamaLM(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                hparams=self.hparams,
+                device=self.device,
+                actual_batch_size=self.config.actual_batch_size,
+            )
+
             if self.is_master:
-                # results_dir = os.path.join(MODEL_PATH, "results")
-                # os.makedirs(results_dir, exist_ok=True)
-
                 self.eval_counter += 1
-
-                has_mmlu_task = "mmlu" in self.task_list
-                should_run_mmlu_n_shot = has_mmlu_task and (
-                    self.config.skip_gaps or self.eval_counter % 4 == 0
-                )
-                tasks = [t for t in self.task_list if t != "mmlu"]
-                # tasks = ",".join(regular_tasks)
-
-                # eval_results_dir = os.path.join(results_dir, "models__eval")
-                # os.makedirs(eval_results_dir, exist_ok=True)
-                process = True
-                if tasks:
+                tasks_to_run = [t for t in self.task_list if t != "mmlu"]
+                
+                if tasks_to_run:
                     results = self._run_lm_eval_direct(
-                        tasks=tasks,
-                        # output_dir=results_dir,
-                        batch_size="auto",  # str(self.config.actual_batch_size)
-                        limit="0.2",
+                        lm_eval_model,
+                        tasks=tasks_to_run,
+                        batch_size="auto",
+                        limit=0.2,
                     )
-
-                    exit_code = float(not bool(results))
-                    self.metrics_logger.log(
-                        measurement="benchmark_metrics",
-                        tags={
-                            "global_step": global_step,
-                            "window": checkpoint_window,
-                            "block": block_number,
-                            "tasks": ",".join(tasks),
-                        },
-                        fields={
-                            "lm_eval_exit_code": exit_code,
-                            "benchmark_runtime_s": float(results.get("benchmark_runtime_s"), -1.0),
-                        },
-                    )
-
-                    if exit_code != 0:
-                        tplr.logger.error("Benchmarking command failed")
-                        process = False
-
-                    # if not os.path.exists(eval_results_dir):
-                    #     tplr.logger.error(
-                    #         f"Results directory not found: {eval_results_dir}"
-                    #     )
-                    #     process = False
-
-                    if process:
+                    if results:
                         await self._process_results(
-                            # task_name=tasks,
-                            # eval_results_dir=eval_results_dir,
                             results,
                             global_step=global_step,
                             checkpoint_window=checkpoint_window,
                             block_number=block_number,
                         )
-                    # if os.path.exists(results_dir):
-                    #     shutil.rmtree(results_dir)
-                else:
-                    tplr.logger.info("No regular tasks to run")
 
-            # Synchronize all ranks after evaluation
             if dist.is_available() and dist.is_initialized():
                 dist.barrier(device_ids=[self.local_rank])
-
-            # Clear cache again for after the huggingface tasks
-            tplr.logger.info(f"Clearing GPU cache, {self.local_rank}")
             torch.cuda.empty_cache()
 
             if self.is_master:
-                # results_dir = os.path.join(MODEL_PATH, "results")
-                # os.makedirs(results_dir, exist_ok=True)
-                # eval_results_dir = os.path.join(results_dir, "models__eval")
-                # os.makedirs(eval_results_dir, exist_ok=True)
-                
                 has_mmlu_task = "mmlu" in self.task_list
-                should_run_mmlu_n_shot = has_mmlu_task and (
+                should_run_mmlu = has_mmlu_task and (
                     self.config.skip_gaps or self.eval_counter % 4 == 0
                 )
 
-                process = True
-                if should_run_mmlu_n_shot:
+                if should_run_mmlu:
                     tplr.logger.info(f"Run #{self.eval_counter}: Running mmlu")
-
                     results = self._run_lm_eval_direct(
-                        tasks="mmlu",
-                        # output_dir=results_dir,
-                        # model_args=f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH}",
-                        limit="0.15",
+                        lm_eval_model,
+                        tasks=["mmlu"],
+                        limit=0.15,
                         num_fewshot=5,
                         batch_size="auto",
                     )
-
-                    exit_code = float(not bool(results))
-                    self.metrics_logger.log(
-                        measurement="benchmark_metrics",
-                        tags={
-                            "global_step": global_step,
-                            "window": checkpoint_window,
-                            "block": block_number,
-                            "tasks": "mmlu",
-                        },
-                        fields={
-                            "lm_eval_exit_code": exit_code,
-                            "benchmark_runtime_s": float(results.get("benchmark_runtime_s", -1.0)),
-                        },
-                    )
-
-                    if exit_code != 0:
-                        tplr.logger.error("Benchmarking command failed")
-                        process = False
-
-                    # if not os.path.exists(eval_results_dir):
-                    #     tplr.logger.error(
-                    #         f"Results directory not found: {eval_results_dir}"
-                    #     )
-                    #     process = False
-
-                    if process:
+                    if results:
                         await self._process_results(
                             results,
-                            # task_name="mmlu",
-                            # eval_results_dir=eval_results_dir,
                             global_step=global_step,
                             checkpoint_window=checkpoint_window,
                             block_number=block_number,
                         )
-                           
-                    # if os.path.exists(results_dir):
-                    #     shutil.rmtree(results_dir)
-
                 elif has_mmlu_task:
                     tplr.logger.info(
                         f"Skipping mmlu (run #{self.eval_counter}, next at run #{(self.eval_counter // 4 + 1) * 4})"
                     )
 
-                # if os.path.exists(MODEL_PATH):
-                #     shutil.rmtree(MODEL_PATH)
-
-                # tplr.logger.info(f"Removed {MODEL_PATH}")
-
-        # All ranks should clear cache
-        tplr.logger.info(f"Clearing GPU cache, {self.local_rank}")
         torch.cuda.empty_cache()
-
-        # Synchronize all ranks after evaluation
         if dist.is_available() and dist.is_initialized():
             dist.barrier(device_ids=[self.local_rank])
-
-        # Clear cache again for after the huggingface tasks
-        tplr.logger.info(f"Clearing GPU cache, {self.local_rank}")
         torch.cuda.empty_cache()
 
         self.last_eval_window = checkpoint_window
@@ -836,8 +520,6 @@ class Evaluator:
             f"Successfully evaluated checkpoint (window: {checkpoint_window}, "
             f"global_step: {global_step}, block: {block_number})"
         )
-
-        # Return to gpu for next cycle
         self.model = self.model.to(self.device)
 
     @decos.evaluator_exception_catcher()
@@ -856,11 +538,8 @@ class Evaluator:
             )
         os.environ["DATASET_BINS_PATH"] = self.config.custom_eval_path
 
-        # 1. Determine the file prefix by checking what exists
         eval_path = Path(self.config.custom_eval_path)
-        file_prefix = "train"  # default
-
-        # Check for different possible prefixes
+        file_prefix = "train"
         if (eval_path / "val_000000.npy").exists():
             file_prefix = "val"
         elif (eval_path / "eval_000000.npy").exists():
@@ -871,22 +550,17 @@ class Evaluator:
         if self.is_master:
             tplr.logger.info(f"Using file prefix: {file_prefix}")
 
-        # 2. Setup dataset and dataloader
-        # For distributed evaluation, each rank processes different samples
         custom_dataset = tplr.SharedShardedDataset(
-            shard_index=0,  # Use shard index 0 for evaluation dataset
+            shard_index=0,
             sequence_length=self.hparams.sequence_length,
             rank=self.rank if self.world_size > 1 else 0,
             world_size=self.world_size,
-            file_prefix=file_prefix,  # Use detected or default prefix
+            file_prefix=file_prefix,
         )
 
-        # Create a distributed sampler if using multiple GPUs
         if self.world_size > 1:
-            # Limit to 1024 samples total, distributed across ranks
             total_samples = min(1024, len(custom_dataset))
             indices = list(range(total_samples))
-            # Each rank gets a subset
             samples_per_rank = total_samples // self.world_size
             start_idx = self.rank * samples_per_rank
             end_idx = (
@@ -896,7 +570,6 @@ class Evaluator:
             )
             sampler = torch.utils.data.SubsetRandomSampler(indices[start_idx:end_idx])
         else:
-            # Single GPU: use all samples up to 1024
             sampler = torch.utils.data.SubsetRandomSampler(
                 range(min(1024, len(custom_dataset)))
             )
@@ -909,43 +582,35 @@ class Evaluator:
             pin_memory=True,
         )
 
-        # 2. Prepare model for evaluation
-        self.model.to(self.device)  # type: ignore
+        self.model.to(self.device)
         self.model.eval()
 
         local_loss = 0.0
         local_tokens = 0
         start_time = time.time()
 
-        # 3. Evaluation loop
         with torch.inference_mode():
-            for batch_idx, batch in enumerate(tqdm(dataloader, desc="Custom Eval")):
+            for batch in tqdm(dataloader, desc="Custom Eval"):
                 input_ids = batch.to(self.device, dtype=torch.long, non_blocking=True)
                 labels = input_ids.clone()
-                labels[:, :-1] = input_ids[:, 1:]  # shift left by one
+                labels[:, :-1] = input_ids[:, 1:]
                 labels[:, -1] = self.tokenizer.pad_token_id
                 labels = torch.where(
                     labels == self.tokenizer.pad_token_id, -100, labels
                 )
-                # Get device from model parameters (more robust for TorchTitan)
                 model_device = next(self.model.parameters()).device
                 with torch.autocast(
                     device_type=model_device.type, dtype=torch.bfloat16
                 ):
-                    # TorchTitan model returns logits directly
                     logits = self.model(input_ids)
-                # Calculate loss using cross_entropy_loss from TorchTitan
                 loss = cross_entropy_loss(logits, labels)
 
-                # Accumulate loss, weighted by the number of tokens
                 num_tokens = (labels != -100).sum().item()
                 if num_tokens > 0:
                     local_loss += loss.item() * num_tokens
                     local_tokens += num_tokens
 
-        # 4. Gather results from all ranks if distributed
         if self.world_size > 1:
-            # Convert to tensors for all_reduce
             loss_tensor = torch.tensor([local_loss], device=self.device)
             tokens_tensor = torch.tensor([local_tokens], device=self.device)
 
@@ -958,7 +623,6 @@ class Evaluator:
             total_loss = local_loss
             total_tokens = local_tokens
 
-        # 5. Calculate final metrics (only master logs)
         eval_runtime = time.time() - start_time
         average_loss = total_loss / total_tokens if total_tokens > 0 else 0
         perplexity = (
@@ -973,8 +637,6 @@ class Evaluator:
                 f"Avg Loss: {average_loss:.4f}, Runtime: {eval_runtime:.2f}s, "
                 f"Total tokens: {total_tokens}"
             )
-
-            # 6. Log metrics (only master)
             self.metrics_logger.log(
                 "custom_evaluation",
                 tags={
@@ -993,15 +655,7 @@ class Evaluator:
 
     @decos.async_evaluator_exception_catcher()
     async def run(self) -> None:
-        """Main evaluation loop.
-
-        Continuously:
-        1. Check for new checkpoints by window number and block
-        2. Trigger evaluation when new checkpoint detected
-        3. Handle interrupts and errors
-        4. Maintain evaluation interval
-        """
-        # Only master starts background tasks
+        """Main evaluation loop."""
         if self.is_master:
             self.comms.start_commitment_fetcher()
             self.comms.start_background_tasks()
@@ -1009,7 +663,6 @@ class Evaluator:
         await self._evaluate()
 
         while not self.stop_event.is_set():
-            # Only master updates state and checks for new checkpoints
             latest_block = None
             start_window = None
             if self.is_master:
@@ -1027,15 +680,13 @@ class Evaluator:
                         f"New checkpoint detected (block: {latest_block}, window: {start_window}), executing benchmark..."
                     )
             else:
-                # Non-master ranks just wait for master's decision
                 should_evaluate = False
 
-            # Broadcast evaluation decision to all ranks
             if dist.is_available() and dist.is_initialized():
                 should_eval_tensor = torch.tensor(
                     [1 if should_evaluate else 0],
                     dtype=torch.int32,
-                    device=self.device if self.device != "cpu" else "cpu",
+                    device=self.device,
                 )
                 dist.broadcast(should_eval_tensor, src=0)
                 should_evaluate = bool(should_eval_tensor.item())
@@ -1060,21 +711,13 @@ class Evaluator:
 
     def _run_lm_eval_direct(
         self,
+        lm_eval_model,
         tasks: list[str],
         batch_size: str = "auto",
-        limit: float | None = None,
+        limit: float = 1.0,
         num_fewshot: int | None = None,
     ) -> dict[str, Any] | None:
-        """Run lm-eval benchmarks directly in-process.
-
-        Args:
-            tasks: Comma-separated string of task names.
-            limit: Fraction of dataset to use.
-            num_fewshot: Number of few-shot examples.
-
-        Returns:
-            A dictionary containing evaluation results, or None on failure.
-        """
+        """Run lm-eval benchmarks directly in-process."""
         if not self.is_master:
             return None
 
@@ -1083,16 +726,6 @@ class Evaluator:
         )
         start_time = time.time()
 
-        # The model is already on the correct device from the init or previous steps
-        # No need to move it here.
-        lm_eval_model = TitanLlamaLM(
-            model=self.model,
-            tokenizer=self.tokenizer,
-            hparams=self.hparams,
-            device=self.device,
-            actual_batch_size="auto", # self.config.actual_batch_size,
-        )
-
         try:
             results: Dict[str, Any] | None = simple_evaluate(
                 model=lm_eval_model,
@@ -1100,9 +733,7 @@ class Evaluator:
                 limit=limit,
                 num_fewshot=num_fewshot,
                 batch_size=batch_size,
-                device=self.device,
             )
-            # Add benchmark runtime to the results dict
             if results:
                 results["benchmark_runtime_s"] = time.time() - start_time
             return results
@@ -1123,8 +754,8 @@ def main() -> None:
         tplr.logger.exception(f"Evaluator encountered an error: {e}")
     finally:
         evaluator.cleanup()
-
-        evaluator.model = evaluator.model.to("cpu")  # type: ignore
+        if hasattr(evaluator, 'model'):
+            evaluator.model = evaluator.model.to("cpu")
         torch.cuda.empty_cache()
 
         if "DATASET_BINS_PATH" in os.environ:

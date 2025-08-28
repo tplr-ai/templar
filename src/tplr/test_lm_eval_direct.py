@@ -11,22 +11,26 @@ from lm_eval import simple_evaluate
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 from tqdm import tqdm
+from accelerate.utils.memory import find_executable_batch_size
 
 import tplr
 from tplr.model_factory import initialize_torchtitan_model
 
 
 class TitanLlamaLM(LM):
-    def __init__(self, model, tokenizer, device="cuda"):
+    def __init__(self, model, tokenizer, hparams, device="cuda", actual_batch_size=1):
         super().__init__()
         self.model = model
         self.tokenizer = tokenizer
+        self.hparams = hparams
         self.device = device
         self.model.to(self.device)
         self.model.eval()  # Set model to evaluation mode
+        self.model_size = hparams.model_size
 
         # lm_eval expects these properties
-        self._batch_size = 1  # Can be adjusted
+        self._batch_size_arg = actual_batch_size
+        self._batch_size = None
         self._max_length = 2048  # Max sequence length for the model
         self.eot_token_id = self.tokenizer.eos_token_id
         self.prefix_token_id = (
@@ -34,6 +38,26 @@ class TitanLlamaLM(LM):
             if self.tokenizer.bos_token_id is not None
             else self.tokenizer.eos_token_id
         )
+
+    @property
+    def batch_size(self):
+        if self._batch_size is None:
+            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+                ideal_batch_size = 128  # Ideal batch size for this model
+                if self._batch_size_arg == "auto":
+                    self._batch_size = int(ideal_batch_size * 0.9)
+                    print(f"Using 'auto' batch size. Set to a safe heuristic: {self._batch_size}")
+                elif self._batch_size_arg == "auto_unsafe":
+                    self._batch_size = ideal_batch_size
+                    print(f"Using 'auto_unsafe' batch size. Set to the full ideal batch size: {self._batch_size}")
+                else:
+                    try:
+                        self._batch_size = int(self._batch_size_arg)
+                        print(f"Using specified batch size: {self._batch_size}")
+                    except ValueError:
+                        print(f"Invalid batch size: {self._batch_size_arg}. Defaulting to a safe batch size of {int(ideal_batch_size * 0.9)}")
+                        self._batch_size = int(ideal_batch_size * 0.9)
+        return self._batch_size
 
     def eot_token_id(self):
         return self.tokenizer.eos_token_id
@@ -65,59 +89,56 @@ class TitanLlamaLM(LM):
         requests: List[Instance],
         disable_tqdm: bool = False,
     ) -> List[Tuple[float, bool]]:
-        res = []
-        for inst in tqdm(requests, desc="loglikelihood", disable=disable_tqdm):
-            context_str, continuation_str = inst.args
-            context_enc = self.tok_encode(context_str)
-            continuation_enc = self.tok_encode(continuation_str)
+        results = []
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+            for i in tqdm(range(0, len(requests), self.batch_size), desc="loglikelihood", disable=disable_tqdm):
+                batch = requests[i:i+self.batch_size]
+                
+                inputs = []
+                for inst in batch:
+                    if len(inst.args) != 2:
+                        continue
+                    context_str, continuation_str = inst.args
+                    context_enc = self.tok_encode(context_str)
+                    continuation_enc = self.tok_encode(continuation_str)
 
-            # Truncate from the left to ensure the sequence fits within the model's max length.
-            # The continuation part must be preserved.
-            max_context_len = self._max_length - len(continuation_enc)
-            if len(context_enc) > max_context_len:
-                context_enc = context_enc[-max_context_len:]
-            
-            # Prepare inputs
-            input_ids = torch.tensor(
-                context_enc + continuation_enc, dtype=torch.long, device=self.device
-            ).unsqueeze(0)
+                    max_context_len = self._max_length - len(continuation_enc)
+                    if len(context_enc) > max_context_len:
+                        context_enc = context_enc[-max_context_len:]
+                    
+                    inputs.append({
+                        "input_ids": torch.tensor(context_enc + continuation_enc, dtype=torch.long),
+                        "continuation_enc": torch.tensor(continuation_enc, dtype=torch.long),
+                        "context_len": len(context_enc)
+                    })
 
-            # Get logits
-            with torch.autocast(
-                device_type=self.device.split(":")[0], dtype=torch.bfloat16
-            ):
-                logits = self.model(input_ids)
+                if not inputs:
+                    continue
 
-            # Calculate log probabilities for the continuation
-            # Shift logits and labels to align for loss calculation
-            # The continuation starts after the context
-            continuation_start_idx = len(context_enc)
+                # Pad the batch
+                padded_inputs = torch.nn.utils.rnn.pad_sequence(
+                    [d["input_ids"] for d in inputs], batch_first=True, padding_value=self.tokenizer.pad_token_id
+                ).to(self.device)
 
-            # Logits for the continuation tokens
-            continuation_logits = logits[
-                :, continuation_start_idx - 1 : -1, :
-            ]  # -1 because we predict the next token
+                logits = self.model(padded_inputs)
 
-            # Target tokens for the continuation
-            continuation_target_ids = torch.tensor(
-                continuation_enc, dtype=torch.long, device=self.device
-            )
+                for j, data in enumerate(inputs):
+                    continuation_start_idx = data["context_len"]
+                    continuation_end_idx = continuation_start_idx + len(data["continuation_enc"])
+                    continuation_logits = logits[j, continuation_start_idx - 1 : continuation_end_idx - 1, :]
+                    continuation_target_ids = data["continuation_enc"].to(self.device)
 
-            # Flatten for F.cross_entropy
-            continuation_logits = continuation_logits.view(-1, logits.shape[-1])
-            continuation_target_ids = continuation_target_ids.view(-1)
+                    continuation_logits = continuation_logits.view(-1, logits.shape[-1])
+                    continuation_target_ids = continuation_target_ids.view(-1)
 
-            # Calculate log probabilities
-            log_probs = F.log_softmax(continuation_logits, dim=-1)
-            log_prob = log_probs.gather(1, continuation_target_ids.unsqueeze(-1)).sum().item()
+                    log_probs = F.log_softmax(continuation_logits, dim=-1)
+                    log_prob = log_probs.gather(1, continuation_target_ids.unsqueeze(-1)).sum().item()
 
-            # Check if greedy
-            # For greedy, we need to check if the argmax of the logits matches the continuation tokens
-            greedy_tokens = continuation_logits.argmax(dim=-1)
-            is_greedy = (greedy_tokens == continuation_target_ids).all().item()
+                    greedy_tokens = continuation_logits.argmax(dim=-1)
+                    is_greedy = (greedy_tokens == continuation_target_ids).all().item()
 
-            res.append((log_prob, is_greedy))
-        return res
+                    results.append((log_prob, is_greedy))
+        return results
 
     @torch.no_grad()
     def generate_until(
@@ -208,7 +229,7 @@ def main():
         "--netuid", type=int, default=3, help="Bittensor network UID."
     )
     parser.add_argument(
-        "--actual_batch_size", type=int, default=1, help="Evaluation batch size."
+        "--actual_batch_size", type=str, default="auto", help="Evaluation batch size."
     )
     parser.add_argument(
         "--device", type=str, default="cuda:0", help="Device to use for evaluation"
@@ -221,6 +242,9 @@ def main():
     )
     parser.add_argument(
         "--num_fewshot", type=int, default=0, help="Number of few-shot examples"
+    )
+    parser.add_argument(
+        "--limit", type=float, default=None, help="Limit the number of examples to evaluate"
     )
     args = parser.parse_args()
 
@@ -248,19 +272,18 @@ def main():
 
     # 4. Create an instance of the custom TitanLlamaLM wrapper
     lm_eval_model = TitanLlamaLM(
-        model=model, tokenizer=hparams.tokenizer, device=device
+        model=model, tokenizer=hparams.tokenizer, hparams=hparams, device=device, actual_batch_size=args.actual_batch_size
     )
 
     # 5. Run simple_evaluate only on the master rank
     if rank == 0:
-        from lm_eval.tasks import get_task_dict
-        task_dict = get_task_dict(args.tasks.split(","))
-
         results = simple_evaluate(
             model=lm_eval_model,
-            tasks=task_dict,
+            tasks=args.tasks.split(','),
             num_fewshot=args.num_fewshot,
-            batch_size=args.actual_batch_size,
+            limit=args.limit,
+            batch_size=lm_eval_model.batch_size,
+            device=device,
         )
         print(results)
 

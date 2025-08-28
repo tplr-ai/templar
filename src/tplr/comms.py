@@ -2206,11 +2206,8 @@ class Comms(ChainManager):
         # --------- rank-0 fetch + minimal metadata ----------
         ok, sync_win, full_sd, present = False, 0, {}, set()
         if is_master:
-            try:
-                init_version = init_version or __version__
-            except NameError:
-                pass
-            result = await self.get_latest_checkpoint(init_version)
+            version_to_check = init_version or tplr.__version__
+            result = await self.get_latest_checkpoint(version_to_check)
             if result:
                 try:
                     checkpoint_data, _ = result
@@ -2479,7 +2476,9 @@ class Comms(ChainManager):
                 tplr.logger.error(f"Error fetching peer list: {e}")
                 await asyncio.sleep(10)
 
-    async def get_start_window(self, retries: int = -1) -> int | None:
+    async def get_start_window(
+        self, version: str = tplr.__version__, retries: int = -1,
+    ) -> int | None:
         """
         Retrieves the official start window from the highest-staked validator.
 
@@ -2489,6 +2488,7 @@ class Comms(ChainManager):
         starting point for training.
 
         Args:
+            version (str, optional): The templar version string. Defaults to `tplr.__version__`.
             retries (int, optional): The number of times to retry fetching the start
                 window. A value of -1 means infinite retries. Defaults to -1.
 
@@ -2510,12 +2510,17 @@ class Comms(ChainManager):
                     await asyncio.sleep(10)
                     continue
 
-                tplr.logger.info(
-                    f"Attempting to fetch start_window from UID {validator_uid} bucket {validator_bucket.name}"
-                )
+                if version == tplr.__version__:
+                    tplr.logger.info(
+                        f"Attempting to fetch start_window from UID {validator_uid} bucket {validator_bucket.name} with default version: {version}."
+                    )
+                else:
+                    tplr.logger.info(
+                        f"Attempting to fetch start_window from UID {validator_uid} bucket {validator_bucket.name} with specified version: {version}."
+                    )
 
                 start_window_data = await self.s3_get_object(
-                    key=f"start_window_v{tplr.__version__}.json",
+                    key=f"start_window_v{version}.json",
                     bucket=validator_bucket,
                 )
 

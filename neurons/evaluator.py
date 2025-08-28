@@ -352,7 +352,7 @@ class Evaluator:
         self.comms.metagraph = self.comms.subtensor.metagraph(netuid=self.netuid)
         self.buckets = self.comms.get_all_buckets()
 
-    async def load_latest_model(self) -> tuple[bool, int, int]:
+    async def load_latest_model(self) -> tuple[bool, int]:
         """Load and prepare the latest model checkpoint for evaluation.
 
         This method:
@@ -364,7 +364,6 @@ class Evaluator:
             Tuple containing:
             - success (bool): Whether loading succeeded
             - checkpoint_window (int): Window number of checkpoint
-            - global_step (int): Global training step
         """
         # Get the current window to check against
         current_window = (
@@ -385,7 +384,7 @@ class Evaluator:
                     f"No valid checkpoints found. Check bucket: {getattr(self.comms, 'bucket', 'unknown')}, "
                     f"key_prefix: {self.comms.key_prefix}"
                 )
-            return (False, 0, 0)
+            return (False, 0)
 
         if checkpoint_window <= self.last_eval_window:
             if self.is_master:
@@ -393,21 +392,16 @@ class Evaluator:
                     f"Checkpoint already evaluated (checkpoint window: {checkpoint_window}, "
                     f"last evaluated: {self.last_eval_window})."
                 )
-            return (False, checkpoint_window, 0)
-
-        # Calculate global step (assuming start_window is 0 for evaluator)
-        global_step = checkpoint_window
+            return (False, checkpoint_window)
 
         if self.is_master:
-            tplr.logger.info(
-                f"Loaded checkpoint (window={checkpoint_window}, global_step={global_step})"
-            )
+            tplr.logger.info(f"Loaded checkpoint (window={checkpoint_window})")
 
         # Synchronize all ranks after loading
         if dist.is_available() and dist.is_initialized():
             dist.barrier(device_ids=[self.local_rank])
 
-        return (True, checkpoint_window, global_step)
+        return (True, checkpoint_window)
 
     def _run_lm_eval(
         self,
@@ -431,7 +425,7 @@ class Evaluator:
         Returns:
             Tuple containing (exit_code, runtime)
         """
-        default_model_args = [f"pretrained={MODEL_PATH}", f"tokenizer={MODEL_PATH}"]
+        default_model_args = [f"pretrained={MODEL_PATH}", f"tokenizer={MODEL_PATH}", "max_length=2048"]
 
         extra = None
         device_arg = self.device
@@ -460,7 +454,7 @@ class Evaluator:
             f"--device {device_arg}",
             f"--batch_size {batch_size}",
             f"--output_path {output_dir}",
-            f"--limit 0.2",
+            # '--gen_kwargs "max_gen_toks=2048",
         ]
 
         if limit:
@@ -583,7 +577,7 @@ class Evaluator:
         return
 
     @decos.async_evaluator_exception_catcher()
-    async def _evaluate(self) -> int | None:
+    async def _evaluate(self) -> None:
         """Execute benchmark evaluation on the current model.
 
         Workflow:
@@ -592,30 +586,23 @@ class Evaluator:
         3. Parse results for each task
         4. Log metrics to InfluxDB
         5. Clean up temporary files
-
-        Returns:
-            int | None: Global step number if successful, None on failure
         """
         self.comms.commitments = await self.comms.get_commitments()
         self.comms.update_peers_with_buckets()
-        start_window = await self.comms.get_start_window()
+        start_window = await self.comms.get_start_window(version=self.version)
 
         block_number = self.comms.subtensor.get_current_block() - 1
 
         tplr.logger.info(f"Looking for new checkpoint (block: {block_number})")
 
-        (
-            success,
-            checkpoint_window,
-            global_step,
-        ) = await self.load_latest_model()
+        (success, checkpoint_window) = await self.load_latest_model()
 
         if not success and self.last_eval_window > 0:
             # We've already evaluated something and no new checkpoint is available
             tplr.logger.info(
                 f"No new checkpoint to evaluate (last evaluated window: {self.last_eval_window})"
             )
-            return global_step
+            return
         elif not success and self.last_eval_window == 0:
             # First run with no checkpoint - use initialized model
             tplr.logger.info(
@@ -624,10 +611,23 @@ class Evaluator:
             checkpoint_window = 0
             global_step = 0
         else:
+            # I think this is premature
             self.evaluated_checkpoints.append(checkpoint_window)
+            
+            # Calculate global step, ensuring it's a positive integer
+            global_step = (
+                max(0, checkpoint_window - start_window)
+                if start_window is not None
+                else checkpoint_window
+            )
 
-        # Calculate global step (assuming start_window is 0 for evaluator)
-        global_step = checkpoint_window - start_window
+        # If start_window is not found, default to 0
+        if start_window is None:
+            if self.is_master:
+                tplr.logger.warning(
+                    f"Start window not found for version {self.version}. Defaulting to 0."
+                )
+            start_window = 0       
 
         if self.is_master:
             tplr.logger.info(
@@ -660,7 +660,7 @@ class Evaluator:
                 tplr.logger.error(
                     f"Failed to convert model at step {global_step}: {e}. Skipping evaluation cycle."
                 )
-                return global_step
+                return
 
             # Move to cpu to save space
             self.model = self.model.to("cpu")
@@ -686,14 +686,15 @@ class Evaluator:
                 regular_tasks = [t for t in task_list if t != "mmlu"]
                 tasks = ",".join(regular_tasks)
 
-                eval_results_dir: str = os.path.join(results_dir, "models__eval")
+                eval_results_dir = os.path.join(results_dir, "models__eval")
                 os.makedirs(eval_results_dir, exist_ok=True)
                 process = True
                 if tasks:
                     exit_code, benchmark_runtime = self._run_lm_eval(
                         tasks=tasks,
                         output_dir=results_dir,
-                        batch_size=self.config.actual_batch_size,  # auto goes OOM
+                        batch_size="auto",  # str(self.config.actual_batch_size)
+                        limit="0.2",
                     )
 
                     self.metrics_logger.log(
@@ -744,7 +745,13 @@ class Evaluator:
             if self.is_master:
                 results_dir = os.path.join(MODEL_PATH, "results")
                 os.makedirs(results_dir, exist_ok=True)
+                eval_results_dir = os.path.join(results_dir, "models__eval")
                 os.makedirs(eval_results_dir, exist_ok=True)
+                
+                has_mmlu_task = "mmlu" in self.task_list
+                should_run_mmlu_n_shot = has_mmlu_task and (
+                    self.config.skip_gaps or self.eval_counter % 4 == 0
+                )
 
                 process = True
                 if should_run_mmlu_n_shot:
@@ -753,7 +760,7 @@ class Evaluator:
                     exit_code, benchmark_runtime = self._run_lm_eval(
                         tasks="mmlu",
                         output_dir=results_dir,
-                        model_args=f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH}",
+                        # model_args=f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH}",
                         limit="0.15",
                         num_fewshot=5,
                     )
@@ -825,8 +832,6 @@ class Evaluator:
 
         # Return to gpu for next cycle
         self.model = self.model.to(self.device)
-
-        return global_step
 
     @decos.evaluator_exception_catcher()
     def _evaluate_custom(
@@ -1003,7 +1008,7 @@ class Evaluator:
             if self.is_master:
                 await self.update_state()
                 latest_block = self.comms.subtensor.get_current_block()
-                start_window = await self.comms.get_start_window()
+                start_window = await self.comms.get_start_window(version=self.version)
 
                 should_evaluate = start_window is not None and (
                     latest_block > self.last_block_number

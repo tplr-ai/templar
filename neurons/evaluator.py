@@ -780,7 +780,7 @@ class Evaluator:
                         },
                         fields={
                             "lm_eval_exit_code": exit_code,
-                            "benchmark_runtime_s": float(results.get("benchmark_runtime_s", -1.0")),
+                            "benchmark_runtime_s": float(results.get("benchmark_runtime_s", -1.0)),
                         },
                     )
 
@@ -1062,7 +1062,7 @@ class Evaluator:
         self,
         tasks: list[str],
         batch_size: str = "auto",
-        limit: float,
+        limit: float | None = None,
         num_fewshot: int | None = None,
     ) -> dict[str, Any] | None:
         """Run lm-eval benchmarks directly in-process.
@@ -1090,7 +1090,7 @@ class Evaluator:
             tokenizer=self.tokenizer,
             hparams=self.hparams,
             device=self.device,
-            # actual_batch_size="auto", # self.config.actual_batch_size,
+            actual_batch_size="auto", # self.config.actual_batch_size,
         )
 
         try:

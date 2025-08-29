@@ -608,10 +608,19 @@ class Evaluator:
         self.comms.commitments = await self.comms.get_commitments()
         self.comms.update_peers_with_buckets()
         start_window = (
-            await self.comms.get_start_window()
-        )  # version=self.version) # Added version
+            await self.comms.get_start_window(version=self.version) 
+        )
 
-        block_number = self.comms.subtensor.get_current_block() - 1
+        if self.is_master:
+            # Master node determines the block number
+            block_number_list = [self.comms.subtensor.get_current_block() - 1]
+        else:
+            # Other nodes have a placeholder
+            block_number_list = [0]
+
+        # Broadcast the block number from master to all other nodes
+        dist.broadcast_object_list(block_number_list, src=0)
+        block_number = block_number_list[0]
 
         tplr.logger.info(f"Looking for new checkpoint (block: {block_number})")
 
@@ -933,8 +942,8 @@ class Evaluator:
                 await self.update_state()
                 latest_block = self.comms.subtensor.get_current_block()
                 start_window = (
-                    await self.comms.get_start_window()
-                )  # version=self.version) # Added version
+                    await self.comms.get_start_window(version=self.version)
+                )
 
                 should_evaluate = start_window is not None and (
                     latest_block > self.last_block_number

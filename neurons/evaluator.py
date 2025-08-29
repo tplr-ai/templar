@@ -431,7 +431,7 @@ class Evaluator:
         Returns:
             Tuple containing (exit_code, runtime)
         """
-        default_model_args = [f"pretrained={MODEL_PATH}", f"tokenizer={MODEL_PATH}"]
+        default_model_args = [f"pretrained={MODEL_PATH}", f"tokenizer={MODEL_PATH}", "max_length=2048"]
 
         extra = None
         device_arg = self.device
@@ -458,9 +458,9 @@ class Evaluator:
             f"--model_args {model_args}",
             f"--tasks {tasks}",
             f"--device {device_arg}",
-            f"--batch_size {batch_size}",
+            f"--batch_size auto", # {batch_size}",
             f"--output_path {output_dir}",
-            f"--limit 0.2",
+            f"--limit 0.1",
         ]
 
         if limit:

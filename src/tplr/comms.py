@@ -2564,7 +2564,9 @@ class Comms(ChainManager):
                 await asyncio.sleep(10)
 
     async def get_start_window(
-        self, version: str = tplr.__version__, retries: int = -1,
+        self,
+        version: str = tplr.__version__,
+        retries: int = -1,
     ) -> int | None:
         """
         Retrieves the official start window from the highest-staked validator.

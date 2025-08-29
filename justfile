@@ -23,7 +23,7 @@ dev:
     uv pip install --pre -e ".[dev]"
 
 test: dev
-    uv run --prerelease=allow  pytest -sv
+    CUDA_VISIBLE_DEVICES="" uv run --prerelease=allow  pytest -sv
 
 bistro:
     ps aux | grep Bistro

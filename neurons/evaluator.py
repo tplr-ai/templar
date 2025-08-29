@@ -399,9 +399,9 @@ class Evaluator:
                     f"last evaluated: {self.last_eval_window})."
                 )
             return (False, checkpoint_window, 0)
-
-        # Calculate global step (assuming start_window is 0 for evaluator)
-        global_step = checkpoint_window
+        else:
+            # Calculate global step (assuming start_window is 0 for evaluator)
+            global_step = checkpoint_window
 
         if self.is_master:
             tplr.logger.info(
@@ -436,7 +436,11 @@ class Evaluator:
         Returns:
             Tuple containing (exit_code, runtime)
         """
-        default_model_args = [f"pretrained={MODEL_PATH}", f"tokenizer={MODEL_PATH}", "max_length=2048"]
+        default_model_args = [
+            f"pretrained={MODEL_PATH}",
+            f"tokenizer={MODEL_PATH}",
+            "max_length=2048",
+        ]
 
         extra = None
         device_arg = self.device
@@ -463,7 +467,7 @@ class Evaluator:
             f"--model_args {model_args}",
             f"--tasks {tasks}",
             f"--device {device_arg}",
-            f"--batch_size auto", # {batch_size}",
+            f"--batch_size auto",  # {batch_size}",
             f"--output_path {output_dir}",
             f"--limit 0.1",
         ]
@@ -630,9 +634,8 @@ class Evaluator:
             global_step = 0
         else:
             self.evaluated_checkpoints.append(checkpoint_window)
-
-        # Calculate global step (assuming start_window is 0 for evaluator)
-        global_step = checkpoint_window - start_window
+            # Calculate global step (assuming start_window is 0 for evaluator)
+            global_step = checkpoint_window - start_window
 
         if self.is_master:
             tplr.logger.info(

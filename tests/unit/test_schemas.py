@@ -104,3 +104,7 @@ class TestCommsGetResult(unittest.TestCase):
         res = CommsGetResult(status="OK", data={})
         # Current semantics: success if status == "OK" and data is not None
         self.assertTrue(res.success)
+
+
+if __name__ == "__main__":
+    unittest.main()

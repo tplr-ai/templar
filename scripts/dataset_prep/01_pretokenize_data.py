@@ -47,17 +47,17 @@ def tokenize_doc(doc):
     text = doc.get("text")
 
     if not text or not isinstance(text, str):
-        return np.array([], dtype=np.uint16)
+        return np.array([], dtype=np.uint32)
 
     tokens = _tokenizer.encode(text, add_special_tokens=False)
     tokens.append(_tokenizer.eos_token_id)
 
-    tokens_array = np.array(tokens, dtype=np.uint16)
+    tokens_array = np.array(tokens, dtype=np.uint32)
 
-    if not ((0 <= tokens_array) & (tokens_array < 2**16)).all():
-        raise ValueError(
-            f"Token IDs exceed uint16 range. Vocab size: {_tokenizer.vocab_size}"
-        )
+    # if not ((0 <= tokens_array) & (tokens_array < 2**16)).all():
+    #     raise ValueError(
+    #         f"Token IDs exceed uint32 range. Vocab size: {_tokenizer.vocab_size}"
+    #     )
 
     return tokens_array
 
@@ -171,7 +171,7 @@ def main(args):
 
     # Initialize processing variables
     shard_idx = existing_count
-    shard_buffer = np.empty(shard_size, dtype=np.uint16)
+    shard_buffer = np.empty(shard_size, dtype=np.uint32)
     tokens_in_shard = 0
     total_tokens = shard_idx * shard_size
 
@@ -243,7 +243,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--tokenizer",
-        default="togethercomputer/LLaMA-2-7B-32K",
+        default="google/gemma-3-270m",
         help="Transformers tokenizer",
     )
     parser.add_argument(
@@ -260,7 +260,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--r2_prefix",
-        default="remote/tokenized/",
+        default="remote/tokenized2/",
         help="R2 prefix for shards",
     )
     parser.add_argument(
@@ -288,7 +288,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--total_tokens",
         type=int,
-        default=1000 * (1024**3),  # 1T tokens
+        default=1400 * (1024**3),  # 1T tokens
         help="Total tokens to process (default: 1T)",
     )
 

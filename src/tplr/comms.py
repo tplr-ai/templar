@@ -2248,7 +2248,8 @@ class Comms(ChainManager):
         try:
             s3_client = await self._get_s3_client(bucket)
 
-            pat = re.compile(rf"^checkpoint-(\d+)-{uid}-v{re.escape(version)}\.pt$")
+            # pat = re.compile(rf"^checkpoint-(\d+)-{uid}-v{re.escape(version)}\.pt$")
+            pat = rf"^checkpoint-(\d+)-{uid}-v{re.escape(version)}\.pt$"
 
             checkpoints = await self._list_bucket_checkpoints(
                 bucket=bucket, uid=uid, version=version, pat=pat
@@ -2399,9 +2400,9 @@ class Comms(ChainManager):
             return False, 0
 
         # --------- single fan-out of weights/buffers ----------
-        if is_master:
-            tplr.logger.info("Converting")
-            torch_save_to_dcp(checkpoint_path, checkpoint_path)
+        # if is_master:
+        #     tplr.logger.info("Converting")
+        #     torch_save_to_dcp(checkpoint_path, checkpoint_path)
         
         # Barrier for cleanliness
         if dist.is_available() and dist.is_initialized():
@@ -2412,20 +2413,23 @@ class Comms(ChainManager):
             else:
                 dist.barrier()
 
-        state_dict = { "app": AppState(model)}
-        dcp.load(
-            state_dict,
-            checkpoint_path,
-        )
-        # set_model_state_dict(
-        #     model,
-        #     full_sd,
-        #     options=StateDictOptions(
-        #         full_state_dict=True, # Uncommented
-        #         broadcast_from_rank0=True, # Uncommented
-        #         strict=True,
-        #     ),
+        # state_dict = { "app": AppState(model)}
+        # dcp.load(
+        #     state_dict,
+        #     checkpoint_path,
         # )
+        try:
+            set_model_state_dict(
+                model,
+                full_sd,
+                options=StateDictOptions(
+                    full_state_dict=True, # Uncommented
+                    broadcast_from_rank0=True, # Uncommented
+                    strict=True,
+                ),
+            )
+        except Exception as e:
+            raise e
 
         # Barrier for cleanliness
         if dist.is_available() and dist.is_initialized():

@@ -40,6 +40,28 @@ DOWNLOAD_MAX_WORKERS=64 torchrun --standalone --nnodes 1 --nproc_per_node 8 neur
 --custom_eval_path eval \
 --wallet.name templar_test \
 --wallet.hotkey M1
+        $ torchrun --standalone --nnodes 1 --nproc_per_node 8 neurons/evaluator.py \\
+            --device cuda \\
+            --netuid 3 \\
+            --wallet.name $WALLET_NAME  \\
+            --wallet.hotkey $WALLET_HOTKEY
+            --tasks "arc_challenge,winogrande" \\
+            --eval_interval 300 \\
+            --custom_eval_path eval 
+        $ 
+CUDA_VISIBLE_DEVICES="0,1,2,3" DOWNLOAD_MAX_WORKERS=64 torchrun --standalone --nnodes 1 --nproc_per_node 4 neurons/evaluator.py \
+--device cuda \
+--eval_interval 300 \
+--custom_eval_path eval \
+--wallet.name templar_test \
+--wallet.hotkey M1 \
+--version "2.0.4" \
+--actual_batch_size 4 \
+--tasks "" \
+--version "1.0.18"
+
+
+DOWNLOAD_MAX_WORKERS=64 torchrun --standalone --nnodes 1 --nproc_per_node 8 neurons/evaluator.py --device cuda --tasks "" --eval_interval 300 --custom_eval_path eval --wallet.name templar_test --wallet.hotkey M1 --version "2.0.4" | tee retry.txt
 
 For additional environment setup, refer to the miner documentation:
 https://github.com/tplr-ai/templar/blob/main/docs/miner.md
@@ -368,38 +390,55 @@ class Evaluator:
         current_window = (
             self.comms.subtensor.get_current_block() // self.hparams.blocks_per_window
         )
-
+            
         unevaluated_checkpoints = await self.get_unevaluated_checkpoints()
 
-        key = "null"
-        checkpoint_locations = getattr(self, "checkpoint_locations", {})
-        if checkpoint_locations:
-            latest_unevaled_checkpoint = max(checkpoint_locations.keys())
-            key = checkpoint_locations.get(latest_unevaled_checkpoint)
+        if self.is_master:
+            tplr.logger.info("Attempting to load latest model checkpoint...")
+
+        latest_unevaled_checkpoint = "null"
+        # checkpoint_locations = getattr(self, "checkpoint_locations", {})
+        if self.checkpoint_locations:
+            tplr.logger.info(f"{self.checkpoint_locations=}")
+            latest_unevaled_checkpoint = max(self.checkpoint_locations.keys())
+            key = self.checkpoint_locations.get(latest_unevaled_checkpoint)
 
             success = True
             try:
-                checkpoint_path = await self.comms.s3_get_object(key=key, bucket=self.bucket, load_data=False)
-                success, checkpoint_window = await self.comms._hack_load_checkpoint(self.model, checkpoint_path, self.is_master)
-                if not success:
+                if self.is_master:
+                    (
+                        validator_bucket,
+                        validator_uid,
+                    ) = await self.comms._get_highest_stake_validator_bucket()
+                    checkpoint_path = await self.comms.s3_get_object(key=key, bucket=validator_bucket, load_data=False)
+                    ok = True
+
+                if dist.is_available() and dist.is_initialized():
+                    obj = [(bool(ok), checkpoint_path)] if self.is_master else [None]
+                    dist.broadcast_object_list(obj, src=0)
+                    ok, checkpoint_path = obj[0]
+                
+                (success, checkpoint_window) = await self.comms._hack_load_checkpoint(self.model, checkpoint_path, self.is_master)
+                if not success or not ok:
                     raise ValueError("Model didn't load correctly")
             except Exception as e:
                 tplr.logger.exception(e)
                 raise e
 
         else:
+            raise ValueError("not going to use updated function")
             
-            try:
-                # Use load_checkpoint which handles distributed loading properly
-                success, checkpoint_window = await self.comms.load_checkpoint(
-                    model=getattr(self.model, "module", self.model),
-                    current_window=current_window,
-                    init_version=self.version,
-                    is_master=self.is_master,
-                )
-            except Exception as e:
-                tplr.logger.exception(e)
-                raise e
+        #     try:
+        #         # Use load_checkpoint which handles distributed loading properly
+        #         success, checkpoint_window = await self.comms.load_checkpoint(
+        #             model=getattr(self.model, "module", self.model),
+        #             current_window=current_window,
+        #             init_version=self.version,
+        #             is_master=self.is_master,
+        #         )
+        #     except Exception as e:
+        #         tplr.logger.exception(e)
+        #         raise e
 
         if not success:
             if self.is_master:
@@ -980,6 +1019,7 @@ class Evaluator:
                 },
             )
 
+<<<<<<< Updated upstream
     async def get_unevaluated_checkpoints(self) -> list[str | int]:
         available_checkpoints = await self.comms._list_bucket_checkpoints(
             bucket=self.comms.bucket,
@@ -991,6 +1031,33 @@ class Evaluator:
         return unevaluated_checkpoints
 
     @decos.async_evaluator_exception_catcher()
+=======
+<<<<<<< Updated upstream
+    @decos.async_evaluator_exception_catcher(on_error_raise=True)
+=======
+    async def get_unevaluated_checkpoints(self) -> list[str | int]:
+        await self.comms.fetch_commitments()
+
+        (
+            validator_bucket,
+            validator_uid,
+        ) = await self.comms._get_highest_stake_validator_bucket()
+
+        available_checkpoints = await self.comms._list_bucket_checkpoints(
+            bucket=validator_bucket,
+            uid=self.uid,
+            version=self.version,
+        )
+
+        unevaluated_checkpoints = set(available_checkpoints) - set(self.evaluated_checkpoints)
+        tplr.logger.info(f"{unevaluated_checkpoints=}")
+        self.checkpoint_locations = {k:v for k,v in available_checkpoints.items() if k in unevaluated_checkpoints}
+        tplr.logger.info(f"{self.checkpoint_locations=}")
+        return unevaluated_checkpoints
+
+    @decos.async_evaluator_exception_catcher()
+>>>>>>> Stashed changes
+>>>>>>> Stashed changes
     async def run(self) -> None:
         """Main evaluation loop.
 

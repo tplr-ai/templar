@@ -229,7 +229,7 @@ def create_parallel_dims(
     if role == "evaluator":
         # Evaluator: support both single and multi-GPU configurations
         # Ensure dp_shard is at least 1 to prevent division by zero
-        dp_shard = max(1, min(4, world_size))
+        dp_shard = max(1, max(4, world_size))
         if world_size % dp_shard != 0:
             raise ValueError(
                 f"World size ({world_size}) must be divisible by "

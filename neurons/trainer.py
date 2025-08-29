@@ -32,6 +32,7 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     set_model_state_dict,
 )
+from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import SGD, lr_scheduler
 from torch.utils.data import DataLoader
 from torchtitan.components.loss import cross_entropy_loss

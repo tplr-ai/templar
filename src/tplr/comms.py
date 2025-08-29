@@ -218,10 +218,12 @@ class Comms(ChainManager):
         This method sets up a thread pool executor and starts the `track_active_peers`
         task to run in the background, continuously monitoring peer activity.
         """
-        self.loop = asyncio.get_running_loop()
-
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
-        self.loop.set_default_executor(self.executor)
+        # Ensure loop and executor are initialized only once and correctly
+        if not hasattr(self, 'loop') or self.loop is None:
+            self.loop = asyncio.get_running_loop()
+        if not hasattr(self, 'executor') or self.executor is None:
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
+            self.loop.set_default_executor(self.executor)
 
         # Start background tasks
         self.loop.create_task(self.track_active_peers())
@@ -2219,7 +2221,7 @@ class Comms(ChainManager):
 
             return checkpoints
 
-        except (ConnectionClosedError, ClientError):
+        except (ConnectionClosedError, ClientError) as e:
             await self._purge_s3_client(bucket)
             raise e
         except Exception as e:
@@ -2266,7 +2268,7 @@ class Comms(ChainManager):
 
             return None
 
-        except (ConnectionClosedError, ClientError):
+        except (ConnectionClosedError, ClientError) as e:
             await self._purge_s3_client(bucket)
             return None
         except Exception as e:
@@ -2288,10 +2290,10 @@ class Comms(ChainManager):
         ok, sync_win, full_sd, present = False, 0, {}, set()
         if is_master:
             try:
-                init_version = init_version or __version__
+                init_version = init_version or tplr.__version__
             except NameError:
                 pass
-            result = await self.get_latest_checkpoint(init_version)
+            result = await self.get_latest_checkpoint(str(init_version))
             if result:
                 try:
                     checkpoint_data, _ = result
@@ -2322,7 +2324,10 @@ class Comms(ChainManager):
         if dist.is_available() and dist.is_initialized():
             obj = [(bool(ok), int(sync_win), list(present))] if is_master else [None]
             dist.broadcast_object_list(obj, src=0)
-            ok, sync_win, present_list = obj[0]
+            if obj[0] is not None: # Add check for None
+                ok, sync_win, present_list = obj[0]
+            else:
+                ok, sync_win, present_list = False, 0, [] # Handle the case where obj[0] is None
             present = set(present_list or [])
         if not ok:
             return False, 0
@@ -2357,10 +2362,7 @@ class Comms(ChainManager):
         self,
         model,
         checkpoint_path: str,
-        # checkpoint: dict[str, torch.Tensor],
-        # current_window: int,
-        # init_version: str | None = None,
-        is_master: bool = True,
+        is_master: bool, # Removed default value
     ) -> tuple[bool, int]:
         from neurons.trainer import AppState
 
@@ -2394,7 +2396,10 @@ class Comms(ChainManager):
         if dist.is_available() and dist.is_initialized():
             obj = [(bool(ok), int(sync_win), list(present))] if is_master else [None]
             dist.broadcast_object_list(obj, src=0)
-            ok, sync_win, present_list = obj[0]
+            if obj[0] is not None: # Add check for None
+                ok, sync_win, present_list = obj[0]
+            else:
+                ok, sync_win, present_list = False, 0, [] # Handle the case where obj[0] is None
             present = set(present_list or [])
         if not ok:
             return False, 0
@@ -2441,6 +2446,48 @@ class Comms(ChainManager):
                 dist.barrier()
 
         return True, sync_win
+
+    async def download_checkpoint(self, checkpoint_key: str, is_master: bool = True) -> str:
+        """
+        Downloads a specific checkpoint file given its key and handles distributed broadcasting.
+        Returns the local file path where the checkpoint is downloaded.
+        """
+        checkpoint_path = None
+        ok = False
+
+        if is_master:
+            (
+                validator_bucket,
+                validator_uid,
+            ) = await self._get_highest_stake_validator_bucket()
+            
+            if validator_bucket is None:
+                tplr.logger.error("Validator bucket is None, cannot download checkpoint.")
+                ok = False
+            else:
+                checkpoint_path = await self.s3_get_object(key=checkpoint_key, bucket=validator_bucket, load_data=False)
+                ok = True if checkpoint_path else False
+
+        if dist.is_available() and dist.is_initialized():
+            obj = [(bool(ok), checkpoint_path)] if is_master else [None]
+            dist.broadcast_object_list(obj, src=0)
+            if obj[0] is not None: # Add check for None
+                ok, checkpoint_path = obj[0]
+            else:
+                ok, checkpoint_path = False, None # Handle the case where obj[0] is None
+        
+        if not ok or checkpoint_path is None:
+            raise ValueError(f"Failed to download checkpoint for key: {checkpoint_key}")
+        
+        return str(checkpoint_path) # Explicitly cast to str
+
+    async def load_model_from_path(self, model, checkpoint_path: str, is_master: bool = True) -> tuple[bool, int]:
+        """
+        Loads the model from a given local checkpoint path.
+        Returns (success: bool, checkpoint_window: int).
+        """
+        success, checkpoint_window = self._hack_load_checkpoint(model, checkpoint_path, is_master)
+        return success, checkpoint_window
 
     async def post_peer_list(
         self,
@@ -2637,7 +2684,7 @@ class Comms(ChainManager):
                     return None
                 if isinstance(peers_data, dict):
                     peers_dict = peers_data
-                else:
+                else: 
                     peers_dict = json.loads(peers_data.decode("utf-8"))
 
                 reserves = peers_dict.get("reserve_peers", [])
@@ -2698,7 +2745,7 @@ class Comms(ChainManager):
                 if start_window_data is not None:
                     if isinstance(start_window_data, dict):
                         start_window_json = start_window_data
-                    else:
+                    else: # This case should ideally not happen if s3_get_object works as expected for JSON
                         start_window_json = json.loads(
                             start_window_data.decode("utf-8")
                         )

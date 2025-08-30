@@ -35,4 +35,5 @@ from .wandb_ops import initialize_wandb
 from .metrics import *
 from .sharded_dataset import SharedShardedDataset
 from .sharded_sampler import EvalSampler, MinerSampler
+from .dcp_checkpoint import DCPCheckpointer
 from . import muon

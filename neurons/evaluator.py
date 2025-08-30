@@ -64,6 +64,7 @@ from lm_eval import simple_evaluate
 from torch.utils.data import DataLoader
 from torchtitan.components.loss import cross_entropy_loss
 from tqdm.auto import tqdm
+from websockets.exceptions import ConcurrencyError
 
 import tplr
 from tplr import (
@@ -612,8 +613,13 @@ class Evaluator:
         )
 
         if self.is_master:
-            # Master node determines the block number
-            block_number_list = [self.comms.subtensor.get_current_block() - 1]
+            block_number_list = []
+            while not block_number_list:
+                try:
+                    # Master node determines the block number
+                    block_number_list = [self.comms.subtensor.get_current_block() - 1]
+                except ConcurrencyError:
+                    pass
         else:
             # Other nodes have a placeholder
             block_number_list = [0]
@@ -621,8 +627,7 @@ class Evaluator:
         # Broadcast the block number from master to all other nodes
         dist.broadcast_object_list(block_number_list, src=0)
         block_number = block_number_list[0]
-
-        tplr.logger.info(f"Looking for new checkpoint (block: {block_number})")
+        plr.logger.info(f"Looking for new checkpoint (block: {block_number})")
 
         (success, checkpoint_window) = await self.load_latest_model()
 

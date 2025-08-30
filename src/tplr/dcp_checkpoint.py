@@ -33,7 +33,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
 )
 from torch.distributed.checkpoint.state_dict_loader import load
-from torch.distributed.checkpoint.state_dict_saver import async_save
+from torch.distributed.checkpoint.state_dict_saver import save
 from torch.distributed.checkpoint.stateful import Stateful
 
 
@@ -129,12 +129,11 @@ class DCPCheckpointer:
         state = {"app": AppState(model)}
 
         # Prefer DCP async_save (TorchTitan’s path); fallback to thread if absent.
-        fut = async_save(
+        save(
             state_dict=state,
             checkpoint_id=str(out_dir),
             process_group=process_group,
         )
-        fut.result()  # ensure the local files exist before upload
 
         if _rank() == 0:
             sidecar = {

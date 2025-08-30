@@ -50,6 +50,7 @@ def setup_evaluator_with_mocks():
         evaluator.hparams.blocks_per_window = 100
         evaluator.is_master = True
         evaluator.current_window = 0  # Initialize current_window
+        evaluator.ckpt = MagicMock()
 
         yield evaluator
 
@@ -72,18 +73,18 @@ async def test_evaluator_skips_old_checkpoints(evaluator):
         10100  # block 10100, window 101
     )
 
-    # Mock load_checkpoint to return failure (window <= last_eval_window)
-    mock_load_checkpoint = AsyncMock(return_value=(False, 100))
-    evaluator.comms.load_checkpoint = mock_load_checkpoint
+    # Mock ckpt.download_and_load to return None (no checkpoint)
+    evaluator.ckpt.download_and_load = AsyncMock(return_value=None)
 
     success, window, step = await evaluator.load_latest_model()
 
-    # Verify that load_checkpoint was called with correct parameters
-    mock_load_checkpoint.assert_called_once_with(
+    # Verify that download_and_load was called with correct parameters
+    evaluator.ckpt.download_and_load.assert_called_once_with(
         model=evaluator.model,
-        current_window=101,
-        init_version=evaluator.version,
-        is_master=True,
+        window=None,
+        shared_fs=True,
+        process_group=None,
+        prefer_highest_staked=True,
     )
 
     assert not success, "Should not load when checkpoint window equals last_eval_window"
@@ -102,18 +103,18 @@ async def test_evaluator_loads_new_checkpoints(evaluator):
         11100  # block 11100, window 111
     )
 
-    # Mock load_checkpoint to return success with new checkpoint window
-    mock_load_checkpoint = AsyncMock(return_value=(True, 110))
-    evaluator.comms.load_checkpoint = mock_load_checkpoint
+    # Mock ckpt.download_and_load to return success with new checkpoint window
+    evaluator.ckpt.download_and_load = AsyncMock(return_value=110)
 
     success, window, step = await evaluator.load_latest_model()
 
-    # Verify that load_checkpoint was called with correct parameters
-    mock_load_checkpoint.assert_called_once_with(
+    # Verify that download_and_load was called with correct parameters
+    evaluator.ckpt.download_and_load.assert_called_once_with(
         model=evaluator.model,
-        current_window=111,
-        init_version=evaluator.version,
-        is_master=True,
+        window=None,
+        shared_fs=True,
+        process_group=None,
+        prefer_highest_staked=True,
     )
 
     assert success, "Should load when checkpoint window > last_eval_window"

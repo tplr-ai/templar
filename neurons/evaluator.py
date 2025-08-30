@@ -64,6 +64,7 @@ from torch.cuda import device_count as _cuda_device_count
 from torch.utils.data import DataLoader
 from torchtitan.components.loss import cross_entropy_loss
 from tqdm.auto import tqdm
+from websockets.exceptions import ConcurrencyError
 
 import tplr
 from tplr import decos
@@ -604,9 +605,22 @@ class Evaluator:
         self.comms.update_peers_with_buckets()
         start_window = await self.comms.get_start_window()
 
-        block_number = self.comms.subtensor.get_current_block() - 1
+        if self.is_master:
+            block_number_list = []
+            while not block_number_list:
+                try:
+                    # Master node determines the block number
+                    block_number_list = [self.comms.subtensor.get_current_block() - 1]
+                except ConcurrencyError:
+                    pass
+        else:
+            # Other nodes have a placeholder
+            block_number_list = [0]
 
-        tplr.logger.info(f"Looking for new checkpoint (block: {block_number})")
+        # Broadcast the block number from master to all other nodes
+        dist.broadcast_object_list(block_number_list, src=0)
+        block_number = block_number_list[0]
+        plr.logger.info(f"Looking for new checkpoint (block: {block_number})")
 
         (
             success,

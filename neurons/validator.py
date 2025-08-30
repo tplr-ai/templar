@@ -240,6 +240,9 @@ class Validator(BaseNode, Trainer):
         tplr.logger.info(f"[Init] device set → {self.device}")
 
         self.init_model(validator=True)
+        self.ckpt = tplr.DCPCheckpointer(
+            self.comms, uid=self.uid, version=tplr.__version__
+        )
         self.expected_compressed_params = self.get_expected_params()
         self.tokenizer = self.hparams.tokenizer
 
@@ -1108,6 +1111,10 @@ class Validator(BaseNode, Trainer):
                         sync_window=self.sync_window,
                         current_window=self.current_window,
                     )
+
+            # Barrier before evaluation starts
+            if self.world_size > 1 and dist.is_initialized():
+                dist.barrier()
 
             # Broadcast the decision to all ranks
             if self.world_size > 1 and dist.is_initialized():
@@ -2020,41 +2027,20 @@ class Validator(BaseNode, Trainer):
                     current_window=self.current_window,
                 )
 
-                checkpoint_data = {
-                    "model_state_dict": get_model_state_dict(
-                        self.model,
-                        options=StateDictOptions(
-                            full_state_dict=True,
-                            cpu_offload=True,  # Offload to CPU to save GPU memory
-                        ),
-                    ),
-                    "start_window": self.start_window,
-                    "current_window": self.current_window,
-                    "sync_window": self.sync_window,
-                }
+                handle = await self.ckpt.save_local_async(
+                    model=self.model,
+                    window=self.sync_window,
+                    sync_window=self.sync_window,
+                    topology="FSDP",
+                )
 
-                if self.is_master:
-                    # Then save asynchronously
-                    async def upload_and_cleanup():
-                        await self.comms.put(
-                            state_dict=checkpoint_data,
-                            uid=str(self.uid),
-                            window=self.sync_window,
-                            key="checkpoint",
-                            global_step=self.global_step,
-                            local=False,
-                        )
-                        # Clear checkpoint from memory after successful upload
-                        checkpoint_data.clear()
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"Checkpoint uploaded and cleared from memory for global_step {self.global_step}",
-                            sync_window=self.sync_window,
-                        )
-
-                    t = asyncio.create_task(upload_and_cleanup())
-                    self._bg_tasks.add(t)
-                    t.add_done_callback(self._bg_tasks.discard)
+                # Schedule an upload that will wait for the save to finish, then upload in background
+                await self.ckpt.upload(
+                    window=self.sync_window,
+                    background=True,
+                    delete_local_on_success=True,
+                    wait_for=handle,
+                )
 
             # Synchronize all ranks before moving to next window
             if self.world_size > 1 and dist.is_initialized():
@@ -3050,14 +3036,14 @@ class Validator(BaseNode, Trainer):
         # Proceed to load checkpoint
         #   • rank-0 (or single-GPU run) downloads & catches-up
         #   • remaining ranks receive state via NCCL broadcast
-        ckpt_ok, ckpt_sync_win = await self.comms.load_checkpoint(
+        ckpt_sync_win = await self.ckpt.download_and_load(
             model=self.model,
-            current_window=self.current_window,
-            init_version=tplr.__version__
-            if has_new_checkpoint
-            else self.bootstrap_version,
-            is_master=self.is_master,
+            window=None,  # latest
+            shared_fs=True,
+            process_group=None,
+            prefer_highest_staked=True,
         )
+        ckpt_ok = ckpt_sync_win is not None
 
         if ckpt_ok:
             tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")

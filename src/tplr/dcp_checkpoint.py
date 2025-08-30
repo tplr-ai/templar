@@ -22,6 +22,7 @@ import hashlib
 import json
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,8 @@ from torch.distributed.checkpoint.state_dict import (
 from torch.distributed.checkpoint.state_dict_loader import load
 from torch.distributed.checkpoint.state_dict_saver import save
 from torch.distributed.checkpoint.stateful import Stateful
+
+import tplr
 
 
 # ── Model-only Stateful (Titan-compatible distributed state dicts) ─────────────
@@ -74,6 +77,10 @@ def _barrier() -> None:
             dist.barrier(device_ids=[torch.cuda.current_device()])
         else:
             dist.barrier()
+
+
+def _mb(b: int) -> float:
+    return b / (1024 * 1024) if b else 0.0
 
 
 @dataclass(slots=True)
@@ -128,12 +135,17 @@ class DCPCheckpointer:
         out_dir = self._local_dir(layout)
         state = {"app": AppState(model)}
 
-        # Prefer DCP async_save (TorchTitan’s path); fallback to thread if absent.
+        t0 = time.perf_counter()
+        tplr.logger.info(
+            f"[DCP][save] rank {_rank()}/{_world()} → begin local save "
+            f"(window={window}, dir={out_dir})"
+        )
         save(
             state_dict=state,
             checkpoint_id=str(out_dir),
             process_group=process_group,
         )
+        dt = time.perf_counter() - t0
 
         if _rank() == 0:
             sidecar = {
@@ -147,6 +159,20 @@ class DCPCheckpointer:
             (out_dir / "extra_metadata.json").write_text(json.dumps(sidecar, indent=2))
 
         _barrier()
+
+        # Post‑barrier: count files/bytes that exist on disk (best‑effort)
+        try:
+            files = [p for p in out_dir.iterdir() if p.is_file()]
+            total_bytes = sum(p.stat().st_size for p in files)
+            tplr.logger.info(
+                f"[DCP][save] rank {_rank()}/{_world()} ← done in {dt:.2f}s "
+                f"(~{len(files)} files, ~{_mb(total_bytes):.2f} MiB)"
+            )
+        except Exception:
+            tplr.logger.info(
+                f"[DCP][save] rank {_rank()}/{_world()} ← done in {dt:.2f}s"
+            )
+
         return out_dir
 
     # ── Upload (per‑rank; rank‑0 handles metadata and pointer) ─────────────────
@@ -161,50 +187,85 @@ class DCPCheckpointer:
         local_dir = self._local_dir(layout)
 
         async def _do() -> None:
+            t_all = time.perf_counter()
             world, r = _world(), _rank()
             files = [p for p in local_dir.iterdir() if p.is_file()]
 
             tasks: list[asyncio.Task] = []
+            data_files = [q for q in files if not _is_meta(q)]
+            meta_files = [q for q in files if _is_meta(q)]
+
+            # Ownership for data shards (deterministic)
+            owned_files = [p for p in data_files if _owner_for(p.name, world) == r]
+            owned_bytes = sum(p.stat().st_size for p in owned_files)
+            meta_bytes = sum(p.stat().st_size for p in meta_files) if r == 0 else 0
+
+            tplr.logger.info(
+                f"[DCP][upload] rank {r}/{world} start (window={window}) | "
+                f"owned shards: {len(owned_files)} (~{_mb(owned_bytes):.2f} MiB)"
+                + (
+                    f", meta: {len(meta_files)} (~{_mb(meta_bytes):.2f} MiB)"
+                    if r == 0
+                    else ""
+                )
+            )
+
+            async def _timed_put(key: str, path: Path, size: int) -> None:
+                t0 = time.perf_counter()
+                await self.comms.s3_put_object(key=key, file_path=str(path))
+                dt = time.perf_counter() - t0
+                tplr.logger.debug(
+                    f"[DCP][upload] rank {r}/{world} ↑ {key} "
+                    f"{_mb(size):.2f} MiB in {dt:.2f}s ({_mb(size) / dt if dt > 0 else 0:.2f} MiB/s)"
+                )
+
             # rank‑0: metadata + version pointer
             if r == 0:
-                for p in (q for q in files if _is_meta(q)):
+                for p in meta_files:
                     tasks.append(
                         asyncio.create_task(
-                            self.comms.s3_put_object(
-                                key=f"{layout.prefix}/{p.name}", file_path=str(p)
-                            )
+                            _timed_put(f"{layout.prefix}/{p.name}", p, p.stat().st_size)
                         )
                     )
                 tmp = local_dir / "_LATEST.json"
                 tmp.write_text(json.dumps({"latest_window": int(window)}, indent=2))
                 tasks.append(
                     asyncio.create_task(
-                        self.comms.s3_put_object(
-                            key=f"checkpoints/{self.version}/_LATEST.json",
-                            file_path=str(tmp),
+                        _timed_put(
+                            f"checkpoints/{self.version}/_LATEST.json",
+                            tmp,
+                            tmp.stat().st_size,
                         )
                     )
                 )
 
             # all ranks: shard/data files by deterministic ownership
-            for p in (q for q in files if not _is_meta(q)):
-                if _owner_for(p.name, world) == r:
-                    tasks.append(
-                        asyncio.create_task(
-                            self.comms.s3_put_object(
-                                key=f"{layout.prefix}/{p.name}", file_path=str(p)
-                            )
-                        )
+            for p in owned_files:
+                tasks.append(
+                    asyncio.create_task(
+                        _timed_put(f"{layout.prefix}/{p.name}", p, p.stat().st_size)
                     )
+                )
 
             if tasks:
                 await asyncio.gather(*tasks)
             _barrier()
 
+            dt_all = time.perf_counter() - t_all
+            total_up_bytes = owned_bytes + (meta_bytes if r == 0 else 0)
+            tplr.logger.info(
+                f"[DCP][upload] rank {r}/{world} done in {dt_all:.2f}s | "
+                f"files={len(tasks)} bytes≈{total_up_bytes} ({_mb(total_up_bytes):.2f} MiB) "
+                f"thru≈{_mb(total_up_bytes) / dt_all if dt_all > 0 else 0:.2f} MiB/s"
+            )
+
             # delete local after everyone finished and uploads succeeded
             if delete_local_on_success and r == 0:
                 try:
                     shutil.rmtree(local_dir, ignore_errors=True)
+                    tplr.logger.info(
+                        f"[DCP][upload] rank 0 cleaned local dir {local_dir} after successful upload"
+                    )
                 except Exception:
                     pass
 
@@ -281,6 +342,7 @@ class DCPCheckpointer:
     async def download_all(
         self, *, window: int | None = None, prefer_highest_staked: bool = True
     ) -> Path | None:
+        t_all = time.perf_counter()
         if window is None:
             window = await self._discover_latest(
                 prefer_highest_staked=prefer_highest_staked
@@ -294,7 +356,12 @@ class DCPCheckpointer:
             prefer_highest_staked=prefer_highest_staked
         )
         s3 = await self.comms._get_s3_client(bucket)
+        tplr.logger.info(
+            f"[DCP][download-all] rank {_rank()}/{_world()} start "
+            f"(window={window}, bucket={bucket.name}, prefix={layout.prefix}/)"
+        )
         got_any = False
+        total_bytes = 0
         cont = None
         while True:
             args = {"Bucket": bucket.name, "Prefix": f"{layout.prefix}/"}
@@ -305,12 +372,29 @@ class DCPCheckpointer:
                 key = obj.get("Key")
                 if key:
                     got_any = True
+                    size = int(obj.get("Size", 0))
+                    t0 = time.perf_counter()
                     await self.comms.s3_get_object(
                         key=key, bucket=bucket, load_data=False, show_progress=False
+                    )
+                    dt = time.perf_counter() - t0
+                    total_bytes += size
+                    tplr.logger.debug(
+                        f"[DCP][download-all] rank {_rank()}/{_world()} ↓ {key} "
+                        f"{_mb(size):.2f} MiB in {dt:.2f}s ({_mb(size) / dt if dt > 0 else 0:.2f} MiB/s)"
                     )
             if not resp.get("IsTruncated"):
                 break
             cont = resp.get("NextContinuationToken")
+
+        dt_all = time.perf_counter() - t_all
+        if got_any:
+            tplr.logger.info(
+                f"[DCP][download-all] rank {_rank()}/{_world()} done in {dt_all:.2f}s | "
+                f"bytes≈{total_bytes} ({_mb(total_bytes):.2f} MiB)"
+                f" thru≈{_mb(total_bytes) / dt_all if dt_all > 0 else 0:.2f} MiB/s"
+            )
+
         if got_any:
             return local_dir
         return None
@@ -326,6 +410,7 @@ class DCPCheckpointer:
           • barrier, then rank‑0 fills any missing files, barrier again
         Result: repo_root/checkpoints/<version>/<window>/... is complete for all ranks.
         """
+        t_all = time.perf_counter()
         if window is None:
             window = await self._discover_latest(
                 prefer_highest_staked=prefer_highest_staked
@@ -343,7 +428,7 @@ class DCPCheckpointer:
         )
         s3 = await self.comms._get_s3_client(bucket)
         # 1) Enumerate keys under the window prefix
-        keys: list[str] = []
+        keys: list[tuple[str, int]] = []
         cont = None
         while True:
             args = {"Bucket": bucket.name, "Prefix": f"{layout.prefix}/"}
@@ -352,41 +437,92 @@ class DCPCheckpointer:
             resp = await s3.list_objects_v2(**args)
             for o in resp.get("Contents", []) or []:
                 if k := o.get("Key"):
-                    keys.append(k)
+                    keys.append((k, int(o.get("Size", 0))))
             if not resp.get("IsTruncated"):
                 break
             cont = resp.get("NextContinuationToken")
 
         # 2) Partition work
-        assigned: list[str] = []
-        for key in keys:
+        assigned: list[tuple[str, int]] = []
+        meta_keys = []
+        for key, sz in keys:
             fname = Path(key).name
             if (r == 0 and _is_meta(Path(fname))) or (
                 not _is_meta(Path(fname)) and _owner_for(fname, world) == r
             ):
-                assigned.append(key)
+                assigned.append((key, sz))
+            if _is_meta(Path(fname)):
+                meta_keys.append((key, sz))
+
+        owned_bytes = sum(
+            sz
+            for _, sz in assigned
+            if not any(
+                Path(
+                    _,
+                ).name.endswith(".json")
+                for _ in [key for key, _ in assigned]
+            )
+        )
+        meta_bytes = sum(sz for _, sz in meta_keys) if r == 0 else 0
+        tplr.logger.info(
+            f"[DCP][download-dist] rank {r}/{world} start (window={window}, bucket={bucket.name}) | "
+            f"assigned: {len(assigned)} (~{_mb(owned_bytes):.2f} MiB)"
+            + (f", meta-by-r0: ~{_mb(meta_bytes):.2f} MiB" if r == 0 else "")
+        )
 
         # 3) Owners download their files (skip if present)
-        for key in assigned:
+        for key, sz in assigned:
             dst = self.repo_root / key  # mirrored path
             if dst.exists():
+                tplr.logger.debug(
+                    f"[DCP][download-dist] rank {r}/{world} skip (exists) {key}"
+                )
                 continue
+            t0 = time.perf_counter()
             await self.comms.s3_get_object(
                 key=key, bucket=bucket, load_data=False, show_progress=False
+            )
+            dt = time.perf_counter() - t0
+            tplr.logger.debug(
+                f"[DCP][download-dist] rank {r}/{world} ↓ {key} "
+                f"{_mb(sz):.2f} MiB in {dt:.2f}s ({_mb(sz) / dt if dt > 0 else 0:.2f} MiB/s)"
             )
 
         _barrier()  # all owners finished
 
         # 4) Rank‑0 mop‑up (if any file is still missing, download it)
         if r == 0:
-            for key in keys:
+            mop_files = 0
+            mop_bytes = 0
+            for key, sz in keys:
                 dst = self.repo_root / key
                 if not dst.exists():
+                    t0 = time.perf_counter()
                     await self.comms.s3_get_object(
-                        key=key, bucket=bucket, load_data=False, show_progress=False
+                        key=key, bucket=bucket, load_data=False, show_progress=True
                     )
+                    dt = time.perf_counter() - t0
+                    mop_files += 1
+                    mop_bytes += sz
+                    tplr.logger.debug(
+                        f"[DCP][download-dist] rank 0 mop-up ↓ {key} "
+                        f"{_mb(sz):.2f} MiB in {dt:.2f}s ({_mb(sz) / dt if dt > 0 else 0:.2f} MiB/s)"
+                    )
+            tplr.logger.info(
+                f"[DCP][download-dist] rank 0 mop-up completed | files={mop_files}, "
+                f"bytes≈{mop_bytes} ({_mb(mop_bytes):.2f} MiB)"
+            )
 
         _barrier()  # ensure folder is complete for all ranks
+
+        dt_all = time.perf_counter() - t_all
+        total_assigned = sum(sz for _, sz in assigned) + (meta_bytes if r == 0 else 0)
+        tplr.logger.info(
+            f"[DCP][download-dist] rank {r}/{world} done in {dt_all:.2f}s | "
+            f"bytes≈{total_assigned} ({_mb(total_assigned):.2f} MiB) "
+            f"thru≈{_mb(total_assigned) / dt_all if dt_all > 0 else 0:.2f} MiB/s"
+        )
         return local_dir
 
     # ── Load (reshard automatically to current topology) ───────────────────────

@@ -304,6 +304,10 @@ class Miner(BaseNode, Trainer):
         self.uid = self.comms.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
         self.comms.uid = self.uid
 
+        self.ckpt = tplr.DCPCheckpointer(
+            self.comms, uid=self.uid, version=tplr.__version__, repo_root="."
+        )
+
         self.bucket = self.comms.get_own_bucket("gradients", "read")
         if self.is_master:
             self.comms.try_commit(self.wallet, self.bucket)
@@ -421,18 +425,14 @@ class Miner(BaseNode, Trainer):
         #   • remaining ranks receive state via NCCL broadcast
         # ------------------------------------------------------------------
 
-        ckpt_ok, ckpt_sync_win = await self.comms.load_checkpoint(
-            model=self.bare_model,
-            current_window=self.current_window,
-            init_version=tplr.__version__
-            if has_new_checkpoint
-            else self.bootstrap_version,
-            is_master=self.is_master,
+        ckpt_sync_win = await self.ckpt.download_and_load(
+            model=self.model,
+            window=None,  # latest
+            shared_fs=True,
+            process_group=None,
+            prefer_highest_staked=True,
         )
-        if ckpt_ok:
-            tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
-        else:
-            tplr.logger.info("No checkpoint found – starting from scratch")
+        ckpt_ok = ckpt_sync_win is not None
 
         # Decide catch-up windows and run catch-up on ALL ranks (avoids DTensor collective hangs)
         need_catchup = (not ckpt_ok) or (

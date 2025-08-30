@@ -29,6 +29,7 @@ class BaseNode(abc.ABC):
     config: Any = None
     hparams: SimpleNamespace
     subtensor: bt.Subtensor
+    ckpt: tplr.DCPCheckpointer
 
     # background bookkeeping
     stop_event: asyncio.Event
@@ -165,6 +166,7 @@ class BaseNode(abc.ABC):
     async def _graceful_shutdown(self, sig):
         tplr.logger.warning(f"↩  received {sig.name} – shutting down …")
         self.stop_event.set()
+        await self.ckpt.flush_background_uploads()
 
         # cancel background asyncio tasks
         for task in list(self._bg_tasks):

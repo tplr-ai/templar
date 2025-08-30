@@ -305,6 +305,9 @@ class Evaluator:
             device=self.device,
             world_size=self.world_size,
         )
+        self.ckpt = tplr.DCPCheckpointer(
+            self.comms, uid=self.uid, version=tplr.__version__, repo_root="."
+        )
 
         self.tokenizer = self.hparams.tokenizer
         # Ensure a pad token exists for loss masking/perplexity
@@ -372,12 +375,14 @@ class Evaluator:
         )
 
         # Use load_checkpoint which handles distributed loading properly
-        success, checkpoint_window = await self.comms.load_checkpoint(
+        checkpoint_window = await self.ckpt.download_and_load(
             model=self.model,
-            current_window=current_window,
-            init_version=self.version,
-            is_master=self.is_master,
+            window=None,
+            shared_fs=True,
+            process_group=None,
+            prefer_highest_staked=True,
         )
+        success = checkpoint_window is not None
 
         if not success:
             if self.is_master:

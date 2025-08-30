@@ -466,7 +466,7 @@ class Comms(ChainManager):
                     await s3_client.put_object(Bucket=bucket.name, Key=key, Body=data)
             else:
                 # Multipart upload for large files -> boto3 TransferManager in a thread
-                await self.upload_large_file(file_path, key, s3_client, bucket)
+                await self._upload_large_file_via_boto3(file_path, key, bucket)
 
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(bucket)
@@ -627,8 +627,12 @@ class Comms(ChainManager):
     #  Large File Operations
 
     async def upload_large_file(
-        self, file_path: str, key: str, s3_client, bucket: Bucket | None = None
-    ):
+        self,
+        file_path: str,
+        key: str,
+        s3_client: Any,
+        bucket: Bucket | None = None,
+    ) -> None:
         """
         Uploads a large file to S3 using a robust, asynchronous multipart strategy.
 
@@ -648,107 +652,238 @@ class Comms(ChainManager):
             Exception: Propagates exceptions from the S3 client if the upload
                 fails after multiple retries.
         """
-        upload_id = None
-        MAX_RETRIES = 3
-        file_size_gb = os.path.getsize(file_path) / (1024 * 1024 * 1024)
-        if file_size_gb > 10:
-            part_size = 128 * 1024 * 1024
-        elif file_size_gb > 1:
-            part_size = 64 * 1024 * 1024
-        else:
-            part_size = 32 * 1024 * 1024
+        # ---- parameters & helpers -------------------------------------------
+        bucket = bucket or self.bucket
+        file_size = os.path.getsize(file_path)
 
-        if bucket is None:
-            bucket = self.bucket
-        try:
-            async with self.client_semaphore:
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        response = await s3_client.create_multipart_upload(
+        # Keep parts under ~9k to stay safely below the 10k S3 limit
+        MIN_PART = 64 * 1024 * 1024  # 64 MiB (S3 min is 5 MiB; use 64 MiB alignment)
+        MAX_PARTS = 9000
+        part_size = max(MIN_PART, math.ceil(file_size / MAX_PARTS))
+        # Round up to 8 MiB alignment for nicer server-side buffering
+        part_size = ((part_size + MIN_PART - 1) // MIN_PART) * MIN_PART
+
+        # Optional overrides via env for tuning
+        part_size = int(os.getenv("TPLR_S3_PART_SIZE", part_size))
+        # Concurrency local to this MPU; also gated by self.client_semaphore
+        concurrency = int(os.getenv("TPLR_S3_CONCURRENCY", "32"))
+        concurrency = max(2, min(concurrency, 32))
+
+        MAX_RETRIES = 5
+        JITTER = 0.1
+
+        def _b64_md5(data: bytes) -> str:
+            return base64.b64encode(__import__("hashlib").md5(data).digest()).decode()
+
+        total_parts = max(1, math.ceil(file_size / part_size))
+        tplr.logger.info(
+            f"[S3][MPU] start key={key} size={file_size}B "
+            f"parts={total_parts} part_size={part_size}B concurrency={concurrency}"
+        )
+
+        # ---- helpers ---------------------------------------------------------
+        async def _create_mpu() -> str:
+            for attempt in range(MAX_RETRIES):
+                try:
+                    async with self.client_semaphore:
+                        resp = await s3_client.create_multipart_upload(
                             Bucket=bucket.name, Key=key
                         )
-                        upload_id = response["UploadId"]
-                        break
-                    except Exception:
-                        if attempt == MAX_RETRIES - 1:
-                            raise
-                        await asyncio.sleep(2**attempt)
-
-                file_size = os.path.getsize(file_path)
-                total_parts = math.ceil(file_size / part_size)
-                parts = []
-
-                async def upload_part(part_number: int):
-                    byte_range_start = (part_number - 1) * part_size
-                    byte_range_end = min(byte_range_start + part_size, file_size)
-
-                    for attempt in range(MAX_RETRIES):
-                        try:
-                            async with aiofiles.open(file_path, "rb") as f:
-                                await f.seek(byte_range_start)
-                                data = await f.read(byte_range_end - byte_range_start)
-
-                            response = await s3_client.upload_part(
-                                Bucket=bucket.name,
-                                Key=key,
-                                PartNumber=part_number,
-                                UploadId=upload_id,
-                                Body=data,
-                            )
-                            return {
-                                "ETag": response["ETag"],
-                                "PartNumber": part_number,
-                            }
-                        except Exception as e:
-                            if attempt == MAX_RETRIES - 1:
-                                tplr.logger.error(
-                                    f"Failed to upload part {part_number} after {MAX_RETRIES} attempts: {e}"
-                                )
-                                raise
-                            await asyncio.sleep(2**attempt)
-
-                # Launch one coroutine per part
-                try:
-                    part_results = await asyncio.gather(
-                        *[
-                            upload_part(part_number)
-                            for part_number in range(1, total_parts + 1)
-                        ]
-                    )
-                    parts.extend(part_results)
+                    return resp["UploadId"]
                 except Exception as e:
-                    tplr.logger.error(f"Multipart upload failed: {e}")
-                    raise
+                    if attempt == MAX_RETRIES - 1:
+                        raise
+                    backoff = (2**attempt) + random.random() * JITTER
+                    tplr.logger.warning(
+                        f"[S3][MPU] create failed (attempt {attempt + 1}) – retrying in {backoff:.2f}s: {e}"
+                    )
+                    await asyncio.sleep(backoff)
+            raise RuntimeError("unreachable")
 
-                parts.sort(key=lambda x: x["PartNumber"])
-
-                for attempt in range(MAX_RETRIES):
-                    try:
+        async def _complete_mpu(upload_id: str, parts: list[dict[str, object]]) -> None:
+            for attempt in range(MAX_RETRIES):
+                try:
+                    async with self.client_semaphore:
                         await s3_client.complete_multipart_upload(
                             Bucket=bucket.name,
                             Key=key,
                             UploadId=upload_id,
                             MultipartUpload={"Parts": parts},
                         )
-                        tplr.logger.info(f"Successfully uploaded {key}")
-                        break
-                    except Exception:
-                        if attempt == MAX_RETRIES - 1:
-                            raise
-                        await asyncio.sleep(2**attempt)
+                    tplr.logger.info(f"[S3][MPU] complete ok key={key}")
+                    return
+                except Exception as e:
+                    if attempt == MAX_RETRIES - 1:
+                        raise
+                    backoff = (2**attempt) + random.random() * JITTER
+                    tplr.logger.warning(
+                        f"[S3][MPU] complete failed (attempt {attempt + 1}) – retrying in {backoff:.2f}s: {e}"
+                    )
+                    await asyncio.sleep(backoff)
 
-        except (ConnectionClosedError, ClientError):
-            await self._purge_s3_client(bucket)
-        except Exception as e:
-            tplr.logger.error(f"Error during multipart upload of {key}: {e}")
-            if upload_id:
-                try:
+        async def _abort_mpu(upload_id: str) -> None:
+            try:
+                async with self.client_semaphore:
                     await s3_client.abort_multipart_upload(
                         Bucket=bucket.name, Key=key, UploadId=upload_id
                     )
-                except Exception as abort_e:
-                    tplr.logger.error(f"Failed to abort multipart upload: {abort_e}")
-            raise
+                tplr.logger.info(f"[S3][MPU] aborted key={key} upload_id={upload_id}")
+            except Exception as e:
+                tplr.logger.warning(f"[S3][MPU] abort failed: {e}")
+
+        # ---- outer restart loop (for NoSuchUpload) ---------------------------
+        upload_attempt = 0
+        while True:
+            upload_attempt += 1
+            start_all = time.perf_counter()
+            uploaded_bytes = 0
+            uploaded_lock = asyncio.Lock()
+
+            upload_id = await _create_mpu()
+            tplr.logger.info(
+                f"[S3][MPU] created key={key} upload_id={upload_id} (attempt {upload_attempt})"
+            )
+
+            # Work queue of part numbers
+            q: asyncio.Queue[int] = asyncio.Queue()
+            for pn in range(1, total_parts + 1):
+                q.put_nowait(pn)
+
+            cancel_event = asyncio.Event()
+            parts_done: dict[int, str] = {}
+            errors: list[BaseException] = []
+
+            async def _worker(wid: int) -> None:
+                nonlocal uploaded_bytes
+                while not cancel_event.is_set():
+                    try:
+                        pn = await asyncio.wait_for(q.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if q.empty():
+                            return
+                        continue
+
+                    byte_start = (pn - 1) * part_size
+                    byte_end = min(byte_start + part_size, file_size)
+                    size = byte_end - byte_start
+
+                    for attempt in range(MAX_RETRIES):
+                        try:
+                            async with aiofiles.open(file_path, "rb") as f:
+                                await f.seek(byte_start)
+                                data = await f.read(size)
+
+                            headers = {"ContentMD5": _b64_md5(data)}
+                            t0 = time.perf_counter()
+                            async with self.client_semaphore:
+                                resp = await s3_client.upload_part(
+                                    Bucket=bucket.name,
+                                    Key=key,
+                                    PartNumber=pn,
+                                    UploadId=upload_id,
+                                    Body=data,
+                                    **headers,
+                                )
+                            dt = time.perf_counter() - t0
+                            async with uploaded_lock:
+                                uploaded_bytes += size
+                            parts_done[pn] = resp["ETag"]
+                            speed = (size / (1024 * 1024)) / max(dt, 1e-6)
+                            tplr.logger.debug(
+                                f"[S3][MPU] ↑ part {pn}/{total_parts} "
+                                f"{size / 1024 / 1024:.2f} MiB in {dt:.2f}s ({speed:.2f} MiB/s) "
+                                f"[worker {wid}]"
+                            )
+                            break
+                        except ClientError as e:
+                            code = e.response.get("Error", {}).get("Code")
+                            if code == "NoSuchUpload":
+                                # The MPU has been invalidated; request a restart.
+                                cancel_event.set()
+                                errors.append(e)
+                                tplr.logger.warning(
+                                    f"[S3][MPU] part {pn} got NoSuchUpload – restarting MPU"
+                                )
+                                break
+                            if attempt == MAX_RETRIES - 1:
+                                cancel_event.set()
+                                errors.append(e)
+                                tplr.logger.error(
+                                    f"[S3][MPU] part {pn} failed after {MAX_RETRIES} attempts: {e}"
+                                )
+                                break
+                            backoff = (2**attempt) + random.random() * JITTER
+                            await asyncio.sleep(backoff)
+                        except (
+                            EndpointConnectionError,
+                            ClientOSError,
+                            ServerDisconnectedError,
+                            asyncio.TimeoutError,
+                        ) as e:
+                            if attempt == MAX_RETRIES - 1:
+                                cancel_event.set()
+                                errors.append(e)
+                                tplr.logger.error(
+                                    f"[S3][MPU] part {pn} network failure after {MAX_RETRIES} attempts: {e}"
+                                )
+                                break
+                            backoff = (2**attempt) + random.random() * JITTER
+                            await asyncio.sleep(backoff)
+                        except Exception as e:
+                            cancel_event.set()
+                            errors.append(e)
+                            tplr.logger.error(
+                                f"[S3][MPU] part {pn} unexpected error: {e}"
+                            )
+                            break
+                    q.task_done()
+
+            workers = [asyncio.create_task(_worker(i)) for i in range(concurrency)]
+            await q.join()
+            cancel_event.set()
+            await asyncio.gather(*workers, return_exceptions=True)
+
+            dt_all = time.perf_counter() - start_all
+            mb = uploaded_bytes / (1024 * 1024)
+            tplr.logger.info(
+                f"[S3][MPU] uploaded ~{mb:.2f} MiB in {dt_all:.2f}s "
+                f"(~{(mb / dt_all) if dt_all > 0 else 0:.2f} MiB/s) key={key}"
+            )
+
+            # If we saw a fatal error (e.g., NoSuchUpload), abort and restart.
+            if errors:
+                await _abort_mpu(upload_id)
+                if any(
+                    isinstance(e, ClientError)
+                    and e.response.get("Error", {}).get("Code") == "NoSuchUpload"
+                    for e in errors
+                ):
+                    if upload_attempt < 3:
+                        tplr.logger.warning(
+                            f"[S3][MPU] restarting MPU for key={key} (attempt {upload_attempt + 1})"
+                        )
+                        continue
+                # Otherwise propagate the first error.
+                raise errors[0]
+
+            # Complete MPU
+            if len(parts_done) != total_parts:
+                await _abort_mpu(upload_id)
+                raise RuntimeError(
+                    f"[S3][MPU] missing parts: have {len(parts_done)} expected {total_parts}"
+                )
+
+            parts_for_complete = [
+                {"PartNumber": pn, "ETag": parts_done[pn]} for pn in sorted(parts_done)
+            ]
+            try:
+                await _complete_mpu(upload_id, parts_for_complete)
+                return
+            except Exception as e:
+                # best effort cleanup, then rethrow
+                await _abort_mpu(upload_id)
+                raise
+        # end while
 
     async def _upload_large_file_via_boto3(
         self, file_path: str, key: str, bucket: Bucket

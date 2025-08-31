@@ -10,7 +10,7 @@
     "blocks_per_window": 65,
     "windows_per_weights": 5,
     "momentum_decay": 0.95,
-    "topk_compression": 32,
+    "topk_compression": 128,
     "target_chunk": 64,
     "binary_score_ma_alpha": 0.05,
     "moving_average_window": 5,

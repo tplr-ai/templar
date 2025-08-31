@@ -255,13 +255,12 @@ def encode_batch_rows(
     *,
     C: int,
     B_choices: tuple[int, ...] = (64, 128),
-) -> tuple[bytes, torch.Tensor, dict]:
+) -> tuple[bytes, dict]:
     """
     Rice/bitmap encoder.
 
     Returns:
       payload: bytes
-      perm_2d: LongTensor [rows, k] that reorders values to the codec order
       meta:    dict with basic stats
     """
     # Normalize dtype & capture device
@@ -339,13 +338,11 @@ def encode_batch_rows(
             best_B = torch.where(update, torch.full_like(best_B, B), best_B)
             best_use_bitmap = torch.where(update, use_bitmap, best_use_bitmap)
 
-    # --- produce payload; build perm to reorder values ------------------
+    # --- produce payload ------------------------------------------------
     bw = BitWriter()
     bw.write_bits(C - 1, 12)
     bw.write_bits(rows, 16)
     bw.write_bits(0, 1)  # reserved
-
-    perm_rows = torch.empty_like(idx, dtype=torch.int64, device=device)  # [rows, k]
 
     for B in B_sorted:
         row_mask = best_B == B
@@ -361,15 +358,10 @@ def encode_batch_rows(
 
         j = idx_sub // B  # [R_b, k]
         loc = idx_sub - j * B  # [R_b, k]
+        # Group by sub-chunk id; sort by j then sort loc within each sub-chunk.
         order = torch.argsort(j, dim=1, stable=True)  # [R_b, k]
-        j_sorted = torch.gather(j, 1, order)
-        loc_sorted = torch.gather(loc, 1, order)
-
-        # Move small per-row slices to CPU only when emitting bits.
-        # Meanwhile build the value permutation aligned with emitted order.
-        j_sorted_cpu = j_sorted.detach().cpu()
-        loc_sorted_cpu = loc_sorted.detach().cpu()
-        order_cpu = order.detach().cpu()
+        j_sorted_cpu = torch.gather(j, 1, order).detach().cpu()
+        loc_sorted_cpu = torch.gather(loc, 1, order).detach().cpu()
 
         for r in range(R_b):
             row_bw = BitWriter()
@@ -378,22 +370,8 @@ def encode_batch_rows(
             use_bitmap = bool(use_bitmap_rows[r].item())
             row_bw.write_bits(1 if use_bitmap else 0, 1)
 
-            js = j_sorted_cpu[r]
-            locs = loc_sorted_cpu[r]
-            ord0 = order_cpu[
-                r
-            ]  # maps emitted positions → original topk positions (pre‑sort)
-
-            # Build per-sub ranges
-            # js is sorted, so find segment starts/ends by scanning
-            # Find first idx per sub via searchsorted
-            # (torch on CPU lacks searchsorted over tensors-of-tensors; do it with numpy)
-            js_np = js.numpy()
-            locs_np = locs.numpy()
-            ord_np = ord0.numpy()
-
-            # indices to fill permutation in emitted order
-            emitted_positions: list[int] = []
+            js_np = j_sorted_cpu[r].numpy()
+            locs_np = loc_sorted_cpu[r].numpy()
 
             # Count occurrences per sub with numpy bincount (fast)
             counts = np.bincount(js_np, minlength=n_sub)
@@ -408,10 +386,7 @@ def encode_batch_rows(
                 base += s_len
                 # within each sub, ensure ascending loc order
                 sub_locs = locs_np[ran]
-                sub_ord = ord_np[ran]
-                sort_idx = np.argsort(sub_locs, kind="stable")
-                sub_locs_sorted = sub_locs[sort_idx]
-                sub_ord_sorted = sub_ord[sort_idx]
+                sub_locs_sorted = np.sort(sub_locs, kind="stable")
                 if use_bitmap:
                     bitmask = 0
                     for locv in sub_locs_sorted.tolist():
@@ -420,8 +395,6 @@ def encode_batch_rows(
                 else:
                     for locv in sub_locs_sorted.tolist():
                         row_bw.write_bits(int(locv), lb)
-                # record permutation chunk in emitted order
-                emitted_positions.extend(sub_ord_sorted.tolist())
 
             # commit row chunk
             row_bytes = row_bw.flush()
@@ -429,19 +402,13 @@ def encode_batch_rows(
             for byte in row_bytes:
                 bw.write_bits(int(byte), 8)
 
-            # write perm for this logical row back on GPU
-            # NOTE: perm maps emitted-order position → original topk position
-            perm_rows[row_mask.nonzero(as_tuple=True)[0][r]] = torch.tensor(
-                emitted_positions, device=device, dtype=torch.int64
-            )
-
     payload = bw.flush()
     meta = {
         "total_bits": len(payload) * 8,
         "avg_bits_per_row": float(best_bits.float().mean().item()),
         "B_hist": {int(b): int((best_B == b).sum().item()) for b in B_sorted},
     }
-    return payload, perm_rows, meta
+    return payload, meta
 
 
 # -------------------------------------------------------------------------

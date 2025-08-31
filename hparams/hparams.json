@@ -12,7 +12,6 @@
     "momentum_decay": 0.95,
     "topk_compression": 32,
     "target_chunk": 64,
-    "use_dct": false,
     "binary_score_ma_alpha": 0.05,
     "moving_average_window": 5,
     "model_size": "70B",

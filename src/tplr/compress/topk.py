@@ -52,83 +52,34 @@ class ChunkingTransformer:
     """
 
     @torch.no_grad()
-    def __init__(self, model, target_chunk, norm="ortho"):
+    def __init__(self, model, target_chunk):
         """
         Initialise the ChunkingTransformer.
 
         Args:
             model: The model whose parameters will be processed.
             target_chunk (int): The target size for tensor chunks.
-            norm (str): The normalization to be used for DCT ('ortho' or None).
         """
         self.target_chunk = target_chunk
 
         self.shape_dict = dict()
-        self.f_dict = dict()
-        self.b_dict = dict()
 
         # Get all variants of model tensor sizes
-        # Generate all possible valid DCT sizes for model tensors
         for _, p in model.named_parameters():
             if not p.requires_grad:
                 continue
             for s in p.shape:
-                # Get the closest smallest divisor to the targeted DCT size
+                # Get the closest smallest divisor to the target chunk size
                 sc = _get_smaller_split(s, self.target_chunk)
                 self.shape_dict[s] = sc
 
-                # Pregenerate DCT basis matrices
-                if sc not in self.f_dict:
-                    I = torch.eye(sc, dtype=p.dtype, device=p.device)  # noqa: E741
-                    self.f_dict[sc] = _dct(I, norm=norm)
-                    self.b_dict[sc] = _idct(I, norm=norm)
-
     @torch.no_grad()
-    def einsum_2d(self, x, b, d=None) -> torch.Tensor:
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Apply a 2D einsum operation for encoding.
-
-        Args:
-            x (torch.Tensor): The input tensor.
-            b (torch.Tensor): The first basis matrix.
-            d (torch.Tensor, optional): The second basis matrix. Defaults to None.
-
-        Returns:
-            torch.Tensor: The transformed tensor.
-        """
-        if d is None:
-            return torch.einsum("...ij, jb -> ...ib", x, b)
-        else:
-            # Note: b-c axis output is transposed to chunk DCT in 2D
-            return torch.einsum("...ijkl, kb, ld -> ...ijbd", x, b, d)
-
-    @torch.no_grad()
-    def einsum_2d_t(self, x, b, d=None) -> torch.Tensor:
-        """
-        Apply a 2D einsum operation for decoding (transpose).
-
-        Args:
-            x (torch.Tensor): The input tensor.
-            b (torch.Tensor): The first basis matrix.
-            d (torch.Tensor, optional): The second basis matrix. Defaults to None.
-
-        Returns:
-            torch.Tensor: The transformed tensor.
-        """
-        if d is None:
-            return torch.einsum("...ij, jb -> ...ib", x, b)
-        else:
-            # Note: b-c axis output is transposed to chunk DCT in 2D
-            return torch.einsum("...ijbd, bk, dl -> ...ijkl", x, b, d)
-
-    @torch.no_grad()
-    def encode(self, x: torch.Tensor, *, use_dct: bool = False) -> torch.Tensor:
-        """
-        Encode a tensor by chunking and optionally applying DCT.
+        Encode a tensor by chunking.
 
         Args:
             x (torch.Tensor): The input tensor to encode.
-            use_dct (bool): Whether to apply the Discrete Cosine Transform.
 
         Returns:
             torch.Tensor: The encoded tensor.
@@ -136,57 +87,27 @@ class ChunkingTransformer:
         if len(x.shape) > 1:  # 2D weights
             n1 = self.shape_dict[x.shape[0]]
             n2 = self.shape_dict[x.shape[1]]
-            n1w = self.f_dict[n1].to(x.device)
-            n2w = self.f_dict[n2].to(x.device)
-            self.f_dict[n1] = n1w
-            self.f_dict[n2] = n2w
-
             x = rearrange(x, "(y h) (x w) -> y x h w", h=n1, w=n2)
-            if use_dct:
-                x = self.einsum_2d(x, n1w, n2w)
-
         else:  # 1D weights
             n1 = self.shape_dict[x.shape[0]]
-            n1w = self.f_dict[n1].to(x.device)
-            self.f_dict[n1] = n1w
-
             x = rearrange(x, "(x w) -> x w", w=n1)
-            if use_dct:
-                x = self.einsum_2d(x, n1w)
 
         return x
 
     @torch.no_grad()
-    def decode(self, x: torch.Tensor, *, use_dct: bool = False) -> torch.Tensor:
+    def decode(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Decode a tensor by un-chunking and optionally applying inverse DCT.
+        Decode a tensor by un-chunking.
 
         Args:
             x (torch.Tensor): The input tensor to decode.
-            use_dct (bool): Whether to apply the inverse Discrete Cosine Transform.
 
         Returns:
             torch.Tensor: The decoded tensor.
         """
         if len(x.shape) > 2:  # 2D weights
-            if use_dct:
-                n1 = x.shape[2]
-                n2 = x.shape[3]
-                n1w = self.b_dict[n1].to(x.device)
-                n2w = self.b_dict[n2].to(x.device)
-                self.b_dict[n1] = n1w
-                self.b_dict[n2] = n2w
-
-                x = self.einsum_2d_t(x, n1w, n2w)
             x = rearrange(x, "y x h w -> (y h) (x w)")
-
         else:  # 1D weights
-            if use_dct:
-                n1 = x.shape[1]
-                n1w = self.b_dict[n1].to(x.device)
-                self.b_dict[n1] = n1w
-
-                x = self.einsum_2d_t(x, n1w)
             x = rearrange(x, "x w -> (x w)")
 
         return x
@@ -621,101 +542,6 @@ class TopKCompressor(Generic[Q]):
             )
 
         return vals_f32
-
-
-# ------------------ DCT helpers (unchanged) -------------------------------
-
-
-# Code modified and sourced from https://github.com/zh217/torch-dct
-def _dct_fft_impl(v) -> torch.Tensor:
-    """FFT-based implementation of the DCT."""
-    return torch.view_as_real(torch.fft.fft(v, dim=1))
-
-
-def _idct_irfft_impl(V) -> torch.Tensor:
-    """IRFFT-based implementation of the IDCT."""
-    return torch.fft.irfft(torch.view_as_complex(V), n=V.shape[1], dim=1)
-
-
-def _dct(x, norm=None) -> torch.Tensor:
-    """
-    Discrete Cosine Transform, Type II (a.k.a. the DCT)
-
-    For the meaning of the parameter `norm`, see:
-    https://docs.scipy.org/doc/scipy-0.14.0/reference/generated/scipy.fftpack.dct.html
-
-    :param x: the input signal
-    :param norm: the normalization, None or 'ortho'
-    :return: the DCT-II of the signal over the last dimension
-    """
-    x_shape = x.shape
-    N = x_shape[-1]
-    x = x.contiguous().view(-1, N)
-
-    v = torch.cat([x[:, ::2], x[:, 1::2].flip([1])], dim=1)
-
-    Vc = _dct_fft_impl(v)
-
-    k = -torch.arange(N, dtype=x.dtype, device=x.device)[None, :] * math.pi / (2 * N)
-    W_r = torch.cos(k)
-    W_i = torch.sin(k)
-
-    V = Vc[:, :, 0] * W_r - Vc[:, :, 1] * W_i
-
-    if norm == "ortho":
-        V[:, 0] /= math.sqrt(N) * 2
-        V[:, 1:] /= math.sqrt(N / 2) * 2
-
-    V = 2 * V.view(*x_shape)
-
-    return V
-
-
-def _idct(X, norm=None) -> torch.Tensor:
-    """
-    The inverse to DCT-II, which is a scaled Discrete Cosine Transform, Type III
-
-    Our definition of idct is that idct(dct(x)) == x
-
-    For the meaning of the parameter `norm`, see:
-    https://docs.scipy.org/doc/scipy-0.14.0/reference/generated/scipy.fftpack.dct.html
-
-    :param X: the input signal
-    :param norm: the normalization, None or 'ortho'
-    :return: the inverse DCT-II of the signal over the last dimension
-    """
-
-    x_shape = X.shape
-    N = x_shape[-1]
-
-    X_v = X.contiguous().view(-1, x_shape[-1]) / 2
-
-    if norm == "ortho":
-        X_v[:, 0] *= math.sqrt(N) * 2
-        X_v[:, 1:] *= math.sqrt(N / 2) * 2
-
-    k = (
-        torch.arange(x_shape[-1], dtype=X.dtype, device=X.device)[None, :]
-        * math.pi
-        / (2 * N)
-    )
-    W_r = torch.cos(k)
-    W_i = torch.sin(k)
-
-    V_t_r = X_v
-    V_t_i = torch.cat([X_v[:, :1] * 0, -X_v.flip([1])[:, :-1]], dim=1)
-
-    V_r = V_t_r * W_r - V_t_i * W_i
-    V_i = V_t_r * W_i + V_t_i * W_r
-
-    V = torch.cat([V_r.unsqueeze(2), V_i.unsqueeze(2)], dim=2)
-
-    v = _idct_irfft_impl(V)
-    x = v.new_zeros(v.shape)
-    x[:, ::2] += v[:, : N - (N // 2)]
-    x[:, 1::2] += v.flip([1])[:, : N // 2]
-
-    return x.view(*x_shape)
 
 
 def _get_prime_divisors(n: int) -> list[int]:

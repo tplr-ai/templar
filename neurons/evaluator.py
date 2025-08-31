@@ -60,6 +60,7 @@ from pathlib import Path
 import bittensor as bt
 import torch
 import torch.distributed as dist
+from lm_eval import simple_evaluate
 from torch.cuda import device_count as _cuda_device_count
 from torch.utils.data import DataLoader
 from torchtitan.components.loss import cross_entropy_loss

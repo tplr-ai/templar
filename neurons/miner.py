@@ -258,8 +258,7 @@ class Miner(BaseNode, Trainer):
                 )
 
             enc = self.transformer.encode(
-                torch.empty(p.shape, dtype=torch.float16, device=self.device),
-                use_dct=self.hparams.use_dct,
+                torch.empty(p.shape, dtype=torch.float16, device=self.device)
             )
             _, _, xshape, totalk, _ = self.compressor.compress(
                 enc,

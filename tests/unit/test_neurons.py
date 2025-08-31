@@ -161,7 +161,6 @@ class TestOuterStep(unittest.TestCase):
             device=self.device,
             is_master=True,
             world_size=2,
-            use_dct=False,
             wandb_run=self.wandb_run,
             global_step=1,
         )
@@ -187,7 +186,6 @@ class TestOuterStep(unittest.TestCase):
             device=self.device,
             is_master=False,
             world_size=2,
-            use_dct=False,
         )
 
         self.optimizer.step.assert_not_called()
@@ -199,7 +197,6 @@ class TestPrepareGradientDict(unittest.TestCase):
         self.miner = MagicMock()
         self.miner.hparams.outer_learning_rate = 0.01
         self.miner.hparams.momentum_decay = 0.9
-        self.miner.hparams.use_dct = False
         self.miner.hparams.topk_compression = 0.1
         self.miner.model = MagicMock()
         self.miner.owned_params = {"param1", "param2"}
@@ -273,7 +270,6 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         self.instance.xshapes = {}
         self.instance.totalks = {}
         self.instance.config.device = "cpu"
-        self.instance.hparams.use_dct = False
         self.instance.hparams.inner_steps = 10
         self.instance.hparams.time_window_delta_seconds = 10
         self.instance.loop = MagicMock()

@@ -13,9 +13,7 @@ from tplr.compress import (
     unpack_12bit_indices,
 )
 from tplr.compress.topk import (
-    _dct,
     _get_smaller_split,
-    _idct,
 )
 
 
@@ -265,8 +263,6 @@ class TestChunkingTransformer:
 
         # Check that dictionaries were populated
         assert len(transform.shape_dict) > 0
-        assert len(transform.f_dict) > 0
-        assert len(transform.b_dict) > 0
 
         # Check that shape_dict contains parameter dimensions
         for param in mock_model.parameters():
@@ -283,33 +279,17 @@ class TestChunkingTransformer:
         param = next(mock_model.parameters())
 
         # Test encoding
-        encoded = transform.encode(param, use_dct=False)
+        encoded = transform.encode(param)
         assert encoded.numel() == param.numel()
 
         # Test decoding
-        decoded = transform.decode(encoded, use_dct=False)
+        decoded = transform.decode(encoded)
         assert decoded.shape == param.shape
         assert torch.allclose(decoded, param.reshape(decoded.shape))
-
-        # Test with DCT
-        encoded_dct = transform.encode(param, use_dct=True)
-        decoded_dct = transform.decode(encoded_dct, use_dct=True)
-        assert decoded_dct.shape == param.shape
 
 
 class TestUtilityFunctions:
     """Test utility functions using actual implementations"""
-
-    def test_dct_idct_round_trip(self):
-        """Test DCT and IDCT implementations"""
-        x = torch.randn(8, 16)  # 128 elements total
-
-        # Apply DCT then IDCT
-        X = _dct(x, norm="ortho")
-        x_reconstructed = _idct(X, norm="ortho")
-
-        # Should reconstruct original
-        assert torch.allclose(x, x_reconstructed, atol=1e-6)
 
     def test_get_smaller_split(self):
         """Test _get_smaller_split function"""

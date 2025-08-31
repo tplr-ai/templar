@@ -87,7 +87,6 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
     # ------------ start ------------
     gradient, xshapes, totalks = {}, {}, {}
     lr = float(miner.hparams.outer_learning_rate)
-    use_dct = getattr(miner.hparams, "use_dct", False)
     topk = getattr(miner.hparams, "topk_compression", 32)
 
     if isinstance(miner.model, torch.nn.parallel.DistributedDataParallel):
@@ -161,7 +160,7 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
             error_feedback.add_(grad_full, alpha=lr)
 
         # --- 4) Encode & compress (owner only) ---
-        encoded = miner.transformer.encode(error_feedback, use_dct=use_dct)
+        encoded = miner.transformer.encode(error_feedback)
 
         idxs, vals, xshape, totalk, quant_params = miner.compressor.compress(
             encoded, topk
@@ -180,7 +179,7 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
             )
 
         # --- 6) Decode & error-feedback update (owner only) ---
-        transmit_grad = miner.transformer.decode(decompressed, use_dct=use_dct)
+        transmit_grad = miner.transformer.decode(decompressed)
         del decompressed
         error_feedback.sub_(transmit_grad)
         # Keep error feedback on GPU for now, batch offload later
@@ -232,7 +231,6 @@ def outer_step(
     device: str,
     is_master: bool,
     world_size: int,
-    use_dct: bool = False,
     wandb_run: Run | None = None,
     global_step: int | None = None,
 ) -> None:
@@ -327,7 +325,7 @@ def outer_step(
                 clip_norm=True,
             )
 
-            full_grad_src = transformer.decode(decompressed, use_dct=use_dct)
+            full_grad_src = transformer.decode(decompressed)
             # Single conversion to target dtype+device to avoid extra temporaries
             full_grad_src = full_grad_src.to(
                 dtype=p.dtype, device=p.device, non_blocking=True
@@ -702,7 +700,6 @@ async def catchup_with_aggregation_server(
             device=instance.config.device,
             is_master=instance.is_master,  # rank-0 handles logging
             world_size=instance.world_size,
-            use_dct=instance.hparams.use_dct,
             wandb_run=instance.wandb if instance.is_master else None,
             global_step=instance.global_step,
         )

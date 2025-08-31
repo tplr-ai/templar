@@ -262,8 +262,7 @@ class Validator(BaseNode, Trainer):
         for n, p in self.model.named_parameters():
             # Use the same approach as miner for creating xshapes and totalks
             enc = self.transformer.encode(
-                torch.empty(p.shape, dtype=torch.float16, device=self.device),
-                use_dct=self.hparams.use_dct,
+                torch.empty(p.shape, dtype=torch.float16, device=self.device)
             )
             _, _, xshape, totalk, _ = self.compressor.compress(
                 enc,
@@ -1698,7 +1697,6 @@ class Validator(BaseNode, Trainer):
                 device=cast(str, self.device),
                 is_master=self.is_master,
                 world_size=self.world_size,
-                use_dct=self.hparams.use_dct,
                 wandb_run=self.wandb if self.is_master else None,
                 global_step=self.global_step,
             )
@@ -2804,9 +2802,7 @@ class Validator(BaseNode, Trainer):
                         quant_params,
                     )
 
-                    full_grad_src = self.transformer.decode(
-                        decompressed, use_dct=self.hparams.use_dct
-                    )
+                    full_grad_src = self.transformer.decode(decompressed)
                     # Single conversion to target dtype+device to avoid extra temporaries
                     full_grad_src = full_grad_src.to(
                         dtype=p.dtype, device=p.device, non_blocking=True

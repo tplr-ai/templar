@@ -259,17 +259,41 @@ class Validator(BaseNode, Trainer):
         self.xshapes = {}
         self.totalks = {}
         # Use bare_model like the miner does to ensure consistent parameter iteration
+        import time
+        total_compress_time = 0.0
+        total_encode_time = 0.0
+        
+        # Enable debug timing in compressor
+        self.compressor._debug_timing = True
+        
         for n, p in self.model.named_parameters():
             # Use the same approach as miner for creating xshapes and totalks
+            encode_start = time.time()
             enc = self.transformer.encode(
                 torch.empty(p.shape, dtype=torch.float16, device=self.device)
             )
+            encode_time = time.time() - encode_start
+            
+            compress_start = time.time()
             _, _, xshape, totalk, _ = self.compressor.compress(
                 enc,
                 self.hparams.topk_compression,
             )
+            compress_time = time.time() - compress_start
+            
             self.xshapes[n] = xshape
             self.totalks[n] = totalk
+            
+            total_encode_time += encode_time
+            total_compress_time += compress_time
+            
+            # Log timing for each layer
+            tplr.logger.info(f"[COMPRESS TIMING] {n}: encode={encode_time:.3f}s, compress={compress_time:.3f}s, shape={p.shape}")
+        
+        tplr.logger.info(f"[COMPRESS TIMING TOTAL] encode={total_encode_time:.3f}s, compress={total_compress_time:.3f}s")
+        
+        # Disable debug timing after initialization
+        self.compressor._debug_timing = False
 
         self.openskill_model = PlackettLuce(
             beta=self.hparams.openskill_beta, tau=self.hparams.openskill_tau

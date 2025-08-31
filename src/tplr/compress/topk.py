@@ -216,24 +216,35 @@ class TopKCompressor(Generic[Q]):
             A tuple containing the compressed data. The format depends on whether
             quantization is used.
         """
+        import time
+        
         if isinstance(x, DT):  # check for dtensors
             x = x.to_local()
         xshape = x.shape
-
+        
+        # Log the shape we're compressing
+        shape_start = time.time()
+        original_shape = xshape
+        
         if len(x.shape) > 2:  # 2D weights
             x = rearrange(x, "y x h w -> y x (h w)")
+        
+        reshape_time = time.time() - shape_start
 
         # Limit topk to max size
         totalk = x.shape[-1]
         topk = self._clamp_topk(x, topk)
 
         # Top‑K
+        topk_start = time.time()
         idx_int64 = torch.topk(
             x.abs(), k=topk, dim=-1, largest=True, sorted=False
         ).indices
         val = torch.gather(x, dim=-1, index=idx_int64)
+        topk_time = time.time() - topk_start
 
         # Flatten to [rows, k] for the codec
+        encode_start = time.time()
         idx2d = idx_int64.reshape(-1, topk).contiguous()
         # GPU‑accelerated encode → bytes
         payload, _meta = encode_batch_rows(
@@ -245,6 +256,15 @@ class TopKCompressor(Generic[Q]):
             dtype=torch.uint8,
             device="cpu",
         )
+        encode_time = time.time() - encode_start
+        
+        # Debug logging for timing
+        if hasattr(self, '_debug_timing') and self._debug_timing:
+            import tplr
+            tplr.logger.info(
+                f"[TOPK COMPRESS] shape={original_shape}, totalk={totalk}, topk={topk}, "
+                f"reshape={reshape_time:.3f}s, topk_select={topk_time:.3f}s, encode={encode_time:.3f}s"
+            )
 
         if self.use_quantization:
             val, qparams = self._quantize_values(val)

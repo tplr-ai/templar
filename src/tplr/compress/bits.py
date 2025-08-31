@@ -263,13 +263,17 @@ def encode_batch_rows(
       payload: bytes
       meta:    dict with basic stats
     """
+    import time
+    start_time = time.time()
+    
     # Normalize dtype & capture device
     if idx.dtype != torch.int64:
         idx = idx.to(torch.int64)
     rows, k = idx.shape
     device = idx.device
-
+    
     # --- pick best B per row (vectorised on GPU) ------------------------
+    b_selection_start = time.time()
     B_sorted = tuple(
         sorted([b for b in B_choices if b > 0 and (C % b) == 0 and (b & (b - 1)) == 0])
     )
@@ -338,7 +342,10 @@ def encode_batch_rows(
             best_B = torch.where(update, torch.full_like(best_B, B), best_B)
             best_use_bitmap = torch.where(update, use_bitmap, best_use_bitmap)
 
+    b_selection_time = time.time() - b_selection_start
+    
     # --- produce payload ------------------------------------------------
+    payload_start = time.time()
     bw = BitWriter()
     bw.write_bits(C - 1, 12)
     bw.write_bits(rows, 16)
@@ -403,11 +410,24 @@ def encode_batch_rows(
                 bw.write_bits(int(byte), 8)
 
     payload = bw.flush()
+    payload_time = time.time() - payload_start
+    total_time = time.time() - start_time
+    
     meta = {
         "total_bits": len(payload) * 8,
         "avg_bits_per_row": float(best_bits.float().mean().item()),
         "B_hist": {int(b): int((best_B == b).sum().item()) for b in B_sorted},
     }
+    
+    # Debug logging
+    if rows > 100:  # Only log for larger tensors to avoid spam
+        import logging
+        logger = logging.getLogger('tplr')
+        logger.info(
+            f"[ENCODE_BATCH_ROWS] rows={rows}, k={k}, C={C}, device={device}, "
+            f"B_selection={b_selection_time:.3f}s, payload={payload_time:.3f}s, total={total_time:.3f}s"
+        )
+    
     return payload, meta
 
 

@@ -85,14 +85,12 @@ class TestTopKCompressor:
         original_indices = torch.tensor([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=torch.int64)
 
         # Pack using the new encoder format
-        payload, perm, _ = encode_batch_rows(original_indices, C=totalk)
+        payload, _ = encode_batch_rows(original_indices, C=totalk)
         idx = torch.tensor(np.frombuffer(payload, dtype=np.uint8), dtype=torch.uint8)
 
         val = torch.tensor(
             [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]], dtype=torch.float32
         )
-        # Reorder values to match permutation
-        val = torch.gather(val, dim=1, index=perm)
 
         # Test decompression with packed format
         result = compress_instance.decompress(p, idx, val, xshape, totalk)
@@ -113,12 +111,12 @@ class TestTopKCompressor:
         idx2_orig = torch.tensor([[4, 5], [6, 7]], dtype=torch.int64)
 
         # Pack them using the new encoder format
-        payload1, perm1, _ = encode_batch_rows(idx1_orig, C=totalk)
+        payload1, _ = encode_batch_rows(idx1_orig, C=totalk)
         idx1_packed = torch.tensor(
             np.frombuffer(payload1, dtype=np.uint8), dtype=torch.uint8
         )
 
-        payload2, perm2, _ = encode_batch_rows(idx2_orig, C=totalk)
+        payload2, _ = encode_batch_rows(idx2_orig, C=totalk)
         idx2_packed = torch.tensor(
             np.frombuffer(payload2, dtype=np.uint8), dtype=torch.uint8
         )
@@ -127,9 +125,6 @@ class TestTopKCompressor:
 
         val1 = torch.tensor([[0.1, 0.2], [0.3, 0.4]], dtype=torch.float32)
         val2 = torch.tensor([[0.5, 0.6], [0.7, 0.8]], dtype=torch.float32)
-        # Reorder values to match permutation
-        val1 = torch.gather(val1, dim=1, index=perm1)
-        val2 = torch.gather(val2, dim=1, index=perm2)
         val_list = [val1, val2]
 
         # Test batch decompression
@@ -211,14 +206,12 @@ class TestTopKCompressor:
 
         # Create test data with Rice/bitmap encoded format
         idx_orig = torch.tensor([[0, 1, 2, 3]], dtype=torch.int64)  # Even count
-        payload, perm, _ = encode_batch_rows(idx_orig, C=totalk)
+        payload, _ = encode_batch_rows(idx_orig, C=totalk)
         idx_packed = torch.tensor(
             np.frombuffer(payload, dtype=np.uint8), dtype=torch.uint8
         )
         idx = [idx_packed]
-        val_orig = torch.tensor([[10.0, 20.0, 30.0, 40.0]], dtype=torch.float32)
-        # Reorder values to match permutation
-        val = [torch.gather(val_orig, dim=1, index=perm)]
+        val = [torch.tensor([[10.0, 20.0, 30.0, 40.0]], dtype=torch.float32)]
 
         # Test with normalisation
         result_norm = compress_instance.batch_decompress(

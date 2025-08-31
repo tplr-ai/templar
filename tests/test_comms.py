@@ -1569,7 +1569,7 @@ def test_valid_rice_bitmap_encoded_indices():
         [[1, 5, 9, 3]], dtype=torch.long
     )  # Shape [1, 4] for one row
     # Use the new encoder format
-    payload, perm, _ = encode_batch_rows(valid_indices, C=totalk)
+    payload, _ = encode_batch_rows(valid_indices, C=totalk)
     packed_data = torch.tensor(
         np.frombuffer(payload, dtype=np.uint8), dtype=torch.uint8
     )
@@ -1589,7 +1589,7 @@ def test_valid_rice_bitmap_encoded_multi_dim():
     # Create a valid 2D tensor (shape: 2 x 4) with valid indices.
     valid_indices = torch.tensor([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=torch.long)
     # Use the new encoder format
-    payload, perm, _ = encode_batch_rows(valid_indices, C=totalk)
+    payload, _ = encode_batch_rows(valid_indices, C=totalk)
     packed_data = torch.tensor(
         np.frombuffer(payload, dtype=np.uint8), dtype=torch.uint8
     )
@@ -1640,7 +1640,7 @@ def test_invalid_rice_bitmap_wrong_topk():
     totalk = 64  # allowed_topk = min(4, 64) = 4
     # Create packed indices with wrong topk (2 instead of 4)
     invalid_indices = torch.tensor([[0, 1]], dtype=torch.long)
-    payload, perm, _ = encode_batch_rows(invalid_indices, C=totalk)
+    payload, _ = encode_batch_rows(invalid_indices, C=totalk)
     packed_data = torch.tensor(
         np.frombuffer(payload, dtype=np.uint8), dtype=torch.uint8
     )
@@ -1660,7 +1660,7 @@ def test_invalid_rice_bitmap_multi_dim_wrong_topk():
     invalid_indices = torch.tensor(
         [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11]], dtype=torch.long
     )
-    payload, perm, _ = encode_batch_rows(invalid_indices, C=totalk)
+    payload, _ = encode_batch_rows(invalid_indices, C=totalk)
     packed_data = torch.tensor(
         np.frombuffer(payload, dtype=np.uint8), dtype=torch.uint8
     )
@@ -1682,7 +1682,7 @@ def test_invalid_rice_bitmap_out_of_bounds():
     # But the encoder will fail before we can test - so let's test with valid encode but wrong totalk
     invalid_indices = torch.tensor([[0, 1, 9, 3]], dtype=torch.long)
     # Encode with a larger C to make it work
-    payload, perm, _ = encode_batch_rows(invalid_indices, C=128)
+    payload, _ = encode_batch_rows(invalid_indices, C=128)
     packed_data = torch.tensor(
         np.frombuffer(payload, dtype=np.uint8), dtype=torch.uint8
     )
@@ -1712,7 +1712,7 @@ def test_override_allowed_topk_rice_bitmap():
     valid_indices = torch.tensor(
         [[0, 9]], dtype=torch.long
     )  # Correct length: 2 elements.
-    payload, perm, _ = encode_batch_rows(valid_indices, C=totalk)
+    payload, _ = encode_batch_rows(valid_indices, C=totalk)
     packed_data = torch.tensor(
         np.frombuffer(payload, dtype=np.uint8), dtype=torch.uint8
     )
@@ -1725,7 +1725,7 @@ def test_override_allowed_topk_rice_bitmap():
     invalid_indices = torch.tensor(
         [[0, 1, 2, 3]], dtype=torch.long
     )  # 4 elements instead of 2.
-    payload, perm, _ = encode_batch_rows(invalid_indices, C=totalk)
+    payload, _ = encode_batch_rows(invalid_indices, C=totalk)
     packed_data = torch.tensor(
         np.frombuffer(payload, dtype=np.uint8), dtype=torch.uint8
     )
@@ -1746,7 +1746,7 @@ def test_topk_auto_adjust_when_totalk_is_lower_rice_bitmap():
     valid_indices = torch.tensor(
         [[0, 1, 2, 3]], dtype=torch.long
     )  # Valid: length matches allowed_topk (which is 4).
-    payload, perm, _ = encode_batch_rows(valid_indices, C=totalk)
+    payload, _ = encode_batch_rows(valid_indices, C=totalk)
     packed_data = torch.tensor(
         np.frombuffer(payload, dtype=np.uint8), dtype=torch.uint8
     )
@@ -1758,7 +1758,7 @@ def test_topk_auto_adjust_when_totalk_is_lower_rice_bitmap():
     invalid_indices = torch.tensor(
         [[0, 1, 2, 3, 4, 5]], dtype=torch.long
     )  # 6 elements instead of 4.
-    payload, perm, _ = encode_batch_rows(invalid_indices, C=totalk)
+    payload, _ = encode_batch_rows(invalid_indices, C=totalk)
     packed_data = torch.tensor(
         np.frombuffer(payload, dtype=np.uint8), dtype=torch.uint8
     )

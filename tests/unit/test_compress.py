@@ -7,11 +7,13 @@ import torch.nn as nn
 from tplr.compress import (
     ChunkingTransformer,
     TopKCompressor,
+    pack_12bit_indices,
+    unpack_12bit_indices,
+)
+from tplr.compress.topk import (
     _dct,
     _get_smaller_split,
     _idct,
-    pack_12bit_indices,
-    unpack_12bit_indices,
 )
 
 

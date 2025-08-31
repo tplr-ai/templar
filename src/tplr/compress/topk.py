@@ -1,14 +1,14 @@
 # The MIT License (MIT)
 # © 2025 tplr.ai
-
+#
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the "Software"), to deal in the Software without restriction, including without limitation
 # the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
 # and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
+#
 # The above copyright notice and this permission notice shall be included in all copies or substantial portions of
 # the Software.
-
+#
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
 # THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
@@ -23,28 +23,24 @@
 import math
 from typing import Generic, Literal, Sequence, TypeAlias, TypeVar, cast, overload
 
+import numpy as np
 import torch
-import torch.fft
 from einops import rearrange
 from torch.distributed.tensor import DTensor as DT
 
 import tplr
 
-from .pack12 import pack_12bit_indices, unpack_12bit_indices
+from .bits import decode_batch_rows, encode_batch_rows
 
 # ─────────── type aliases ────────────────────────────────────────────────
-# primitive shapes
-ShapeT: TypeAlias = tuple[int, ...]  # original dense tensor shape
-Shape4D = tuple[int, int, int, int]  # y, x, h, w
-TotK: TypeAlias = int  # size of the last dim
-
-# 12‑bit packed representation - just the uint8 buffer, no tuple
-IdxT: TypeAlias = torch.Tensor  # 12-bit packed indices (stored as uint8 tensor)
-
+ShapeT: TypeAlias = tuple[int, ...]
+Shape4D = tuple[int, int, int, int]
+TotK: TypeAlias = int
+IdxT: TypeAlias = torch.Tensor  # stored as uint8 byte-stream (new codec)
 QuantParamsT: TypeAlias = tuple[torch.Tensor, float, int, torch.Tensor, torch.dtype]
-
-# For historical names kept elsewhere in the code
 ValT: TypeAlias = torch.Tensor
+
+_DEFAULT_B_CHOICES: tuple[int, ...] = (64, 128)
 
 # Boolean flag that propagates the chosen quantisation mode
 Q = TypeVar("Q", Literal[True], Literal[False])
@@ -53,10 +49,6 @@ Q = TypeVar("Q", Literal[True], Literal[False])
 class ChunkingTransformer:
     """
     A transformer for chunking tensors to enable more efficient gradient processing.
-
-    This class handles the chunking of tensors into smaller blocks, which can be
-    processed more efficiently. It pre-calculates Discrete Cosine Transform (DCT)
-    basis matrices for various tensor sizes to speed up the transformation process.
     """
 
     @torch.no_grad()
@@ -87,9 +79,9 @@ class ChunkingTransformer:
 
                 # Pregenerate DCT basis matrices
                 if sc not in self.f_dict:
-                    I = torch.eye(sc)  # noqa: E741
-                    self.f_dict[sc] = _dct(I, norm=norm).to(p.dtype).to(p.device)
-                    self.b_dict[sc] = _idct(I, norm=norm).to(p.dtype).to(p.device)
+                    I = torch.eye(sc, dtype=p.dtype, device=p.device)  # noqa: E741
+                    self.f_dict[sc] = _dct(I, norm=norm)
+                    self.b_dict[sc] = _idct(I, norm=norm)
 
     @torch.no_grad()
     def einsum_2d(self, x, b, d=None) -> torch.Tensor:
@@ -270,12 +262,12 @@ class TopKCompressor(Generic[Q]):
         """
         topk = min(topk, x.shape[-1])
         topk = max(topk, 2)
-        # Ensure topk is even for 12-bit packing efficiency
+        # Keep even by default (matches broader system expectations).
         topk = topk - (topk % 2)
         return int(topk)
 
     # ------------------------------------------------------------------ #
-    # compress – returns a 5-tuple *or* a 4-tuple, depending on the mode
+    # compress – returns a 5‑tuple (quant) or 4‑tuple (no quant)
     # ------------------------------------------------------------------ #
     @overload
     def compress(
@@ -314,21 +306,34 @@ class TopKCompressor(Generic[Q]):
         totalk = x.shape[-1]
         topk = self._clamp_topk(x, topk)
 
+        # Top‑K
         idx_int64 = torch.topk(
             x.abs(), k=topk, dim=-1, largest=True, sorted=False
         ).indices
         val = torch.gather(x, dim=-1, index=idx_int64)
 
-        # Pack indices into 12-bit representation for efficient storage
-        # This reduces storage by 25% compared to int16
-        idx = pack_12bit_indices(idx_int64)
+        # Flatten to [rows, k] for the codec
+        idx2d = idx_int64.reshape(-1, topk).contiguous()
+        # GPU‑accelerated encode → bytes + permutation
+        payload, perm2d, _meta = encode_batch_rows(
+            idx2d, C=totalk, B_choices=_DEFAULT_B_CHOICES
+        )
 
-        # Apply 8-bit quantization if enabled
+        # Reorder values to match emitted index order (so decode aligns)
+        val2d = val.reshape(-1, topk)
+        val2d = torch.gather(val2d, dim=1, index=perm2d.to(val2d.device))
+        val = val2d.reshape(*val.shape)
+
+        idx_bytes = torch.tensor(
+            np.frombuffer(payload, dtype=np.uint8).copy(),
+            dtype=torch.uint8,
+            device="cpu",
+        )
+
         if self.use_quantization:
-            val, quant_params = self._quantize_values(val)
-            return idx, val, xshape, totalk, quant_params
-
-        return idx, val, xshape, totalk
+            val, qparams = self._quantize_values(val)
+            return idx_bytes, val, xshape, totalk, qparams
+        return idx_bytes, val, xshape, totalk
 
     @torch.no_grad()
     def decompress(
@@ -362,18 +367,23 @@ class TopKCompressor(Generic[Q]):
         if len(xshape) > 2:  # 2D weights
             x = rearrange(x, "y x h w -> y x (h w)")
 
-        # Unpack 12-bit indices using val shape (if needed)
+        # Decode indices
         if idx.dtype == torch.uint8:
-            # 12-bit packed format - unpack it
-            idx_int64 = unpack_12bit_indices(idx, val.shape)
+            payload_bytes = idx.detach().cpu().numpy().tobytes()
+            rows_list, C, _N = decode_batch_rows(payload_bytes)
+            if C != totalk:
+                raise ValueError(f"Index payload C={C} but expected {totalk}")
+            k = val.shape[-1]
+            if any(len(r) != k for r in rows_list):
+                raise ValueError("Row-wise topk size mismatch in index payload")
+            idx_int64 = torch.tensor(
+                rows_list, dtype=torch.int64, device=p.device
+            ).view(*val.shape)
         elif idx.dtype in (torch.int64, torch.long):
-            # Already unpacked (from batch_decompress)
-            idx_int64 = idx
+            idx_int64 = idx.to(p.device)
         else:
-            raise ValueError(
-                f"Expected uint8 (packed) or int64 (unpacked) indices, got {idx.dtype}"
-            )
-        # Ensure val has the same dtype as x for scatter operation
+            raise ValueError(f"Unsupported index tensor dtype: {idx.dtype}")
+
         if val.dtype != x.dtype:
             val = val.to(dtype=x.dtype)
 
@@ -470,13 +480,22 @@ class TopKCompressor(Generic[Q]):
         idx_list = idx if isinstance(idx, Sequence) else [idx]
 
         for i, i_data in enumerate(idx_list):
-            if i_data.dtype != torch.uint8:
-                raise ValueError(
-                    f"Expected uint8 for 12-bit packed indices, got {i_data.dtype}"
-                )
-            # Unpack 12-bit format using corresponding values shape
             v_data = val_list[i]
-            idx_unpacked = unpack_12bit_indices(i_data.to(p.device), v_data.shape)
+            if i_data.dtype == torch.uint8:
+                rows, C, _N = decode_batch_rows(i_data.detach().cpu().numpy().tobytes())
+                if C != totalk:
+                    raise ValueError(f"Index payload C={C} but expected {totalk}")
+                if any(len(r) != v_data.shape[-1] for r in rows):
+                    raise ValueError(
+                        "Row-wise topk size mismatch in index payload (batch)"
+                    )
+                idx_unpacked = torch.tensor(
+                    rows, dtype=torch.int64, device=p.device
+                ).view(*v_data.shape)
+            elif i_data.dtype in (torch.int64, torch.long):
+                idx_unpacked = i_data.to(p.device)
+            else:
+                raise ValueError(f"Unsupported index dtype in batch: {i_data.dtype}")
             unpacked_indices.append(idx_unpacked)
 
         idx_concat = torch.cat(unpacked_indices, dim=-1)
@@ -487,6 +506,7 @@ class TopKCompressor(Generic[Q]):
             p, idx_concat, val_concat, xshape, totalk, quantize_params=None
         )
 
+    # -------------------- quantisation helpers ---------------------------
     @torch.no_grad()
     def _quantize_values(self, val: torch.Tensor) -> tuple[torch.Tensor, QuantParamsT]:
         """
@@ -504,17 +524,18 @@ class TopKCompressor(Generic[Q]):
 
         std = centered.norm() / math.sqrt(centered.numel() - 1)
         scale = self.range_in_sigmas * std / self.n_bins
-        if scale == 0 or torch.isnan(scale) or torch.isinf(scale):
+        if (
+            isinstance(scale, torch.Tensor)
+            and (scale == 0 or torch.isnan(scale) or torch.isinf(scale))
+        ) or (
+            not isinstance(scale, torch.Tensor)
+            and (scale == 0 or not math.isfinite(float(scale)))
+        ):
             scale = torch.tensor(1.0, dtype=centered.dtype, device=val.device)
-
         centered_fp32 = centered.to(torch.float32)
-        qval = (
-            (centered_fp32 / scale + offset)
-            .round()
-            .clamp(0, self.n_bins - 1)
-            .to(torch.uint8)
+        qval = ((centered_fp32 / scale + offset).round().clamp(0, self.n_bins - 1)).to(
+            torch.uint8
         )
-
         device = qval.device
         sums = torch.zeros(self.n_bins, dtype=torch.float32, device=device)
         counts = torch.zeros(self.n_bins, dtype=torch.float32, device=device)
@@ -525,7 +546,7 @@ class TopKCompressor(Generic[Q]):
         )
 
         lookup = torch.where(counts > 0, sums / counts, torch.zeros_like(sums))
-        qparams: QuantParamsT = (shift, float(scale), offset, lookup, val.dtype)
+        qparams: QuantParamsT = (shift, float(scale), int(offset), lookup, val.dtype)
         return qval, qparams
 
     @torch.no_grad()
@@ -543,10 +564,8 @@ class TopKCompressor(Generic[Q]):
             torch.Tensor: The dequantized values.
         """
         if val.dtype == torch.uint8:
-            shift, _, _, lookup, orig_dtype = qparams
-            lookup = (
-                lookup.to(val.device) if isinstance(lookup, torch.Tensor) else lookup
-            )
+            shift, _scale, _offset, lookup, orig_dtype = qparams
+            lookup = lookup.to(val.device)
             deq = lookup[val.long()] + shift
             val = deq.to(orig_dtype)
         return val
@@ -602,6 +621,9 @@ class TopKCompressor(Generic[Q]):
             )
 
         return vals_f32
+
+
+# ------------------ DCT helpers (unchanged) -------------------------------
 
 
 # Code modified and sourced from https://github.com/zh217/torch-dct

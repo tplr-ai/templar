@@ -15,6 +15,11 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+from .bits import (
+    decode_batch_rows,  # decoder (CPU)
+    encode_batch_rows,  # GPU-accelerated encoder → bytes + perm + meta
+    encode_batch_rows_cpu,  # CPU fallback (kept for tests/tools)
+)
 from .pack12 import pack_12bit_indices, unpack_12bit_indices  # legacy
 from .topk import ChunkingTransformer, TopKCompressor
 
@@ -22,6 +27,9 @@ __all__ = [
     # High level
     "TopKCompressor",
     "ChunkingTransformer",
+    "encode_batch_rows",
+    "encode_batch_rows_cpu",
+    "decode_batch_rows",
     "pack_12bit_indices",
     "unpack_12bit_indices",
 ]

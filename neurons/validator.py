@@ -65,6 +65,11 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 
+class NullMetricsLogger:
+    def log(self, *_args, **_kwargs) -> None:
+        return
+
+
 @contextmanager
 def timer(name: str, wandb_obj=None, step=None, metrics_logger=None):
     start = perf_counter()
@@ -356,8 +361,8 @@ class Validator(BaseNode, Trainer):
                 job_type="validation",
             )
         else:
-            self.wandb = None
-            self.metrics_logger = None
+            self.wandb = NullMetricsLogger()
+            self.metrics_logger = NullMetricsLogger()
 
         # Weighted selection counters for fair picking of eval peers
         self.eval_peers = defaultdict(lambda: 1)
@@ -392,6 +397,70 @@ class Validator(BaseNode, Trainer):
         )
 
         self.burn_uid = 1
+
+    # ─────────── Distributed safety helpers ───────────
+    def _dist_ready(self) -> bool:
+        return self.world_size > 1 and dist.is_available() and dist.is_initialized()
+
+    def _all_ok(self, ok: bool, tag: str) -> bool:
+        """
+        Group-wide MIN-reduce on a 1/0 flag: returns True only if all ranks reported ok=True.
+        Never raises; logs and returns False if collectives fail.
+        """
+        if not self._dist_ready():
+            return ok
+        try:
+            t = torch.tensor([1 if ok else 0], dtype=torch.int32, device=self.device)
+            dist.all_reduce(t, op=dist.ReduceOp.MIN)
+            out = bool(t.item())
+            if not out and self.is_master:
+                tplr.log_with_context(
+                    level="warning",
+                    message=f"[sync:{tag}] some rank failed; skipping step",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+            return out
+        except Exception as e:
+            tplr.log_with_context(
+                level="error",
+                message=f"[sync:{tag}] all_reduce failed: {e}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            return False
+
+    def _safe_barrier(self, tag: str) -> bool:
+        if not self._dist_ready():
+            return True
+        try:
+            # If we're on NCCL, ensure the barrier runs on this rank's CUDA device.
+            # Fall back cleanly on older PyTorch or non-NCCL backends.
+            if torch.cuda.is_available():
+                try:
+                    dist.barrier(device_ids=[self.local_rank])
+                    return True
+                except TypeError:
+                    # Older PyTorch or backend that doesn't accept device_ids
+                    pass
+                except Exception as e:
+                    # Unexpected error with device_ids; try a plain barrier before logging.
+                    tplr.log_with_context(
+                        level="warning",
+                        message=f"[barrier:{tag}] device_ids barrier warn: {e}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
+            dist.barrier()
+            return True
+        except Exception as e:
+            tplr.log_with_context(
+                level="error",
+                message=f"[barrier:{tag}] failed: {e}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            return False
 
     def reset_peer(self, uid: int) -> None:
         """
@@ -1054,8 +1123,7 @@ class Validator(BaseNode, Trainer):
                 success_rate = gather_result.success_rate
 
             # Synchronize all ranks after gather processing
-            if self.world_size > 1 and dist.is_initialized():
-                dist.barrier()
+            self._safe_barrier("post_gather")
             gather_time = tplr.T() - gather_start
 
             if self.is_master:
@@ -1128,15 +1196,14 @@ class Validator(BaseNode, Trainer):
                 self.global_step += 1
                 continue
 
-            # Barrier before evaluation starts
-            if self.world_size > 1 and dist.is_initialized():
-                tplr.log_with_context(
-                    level="info",
-                    message="Pre-evaluation barrier sync",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                dist.barrier()
+            # Barrier before evaluation starts (soft)
+            tplr.log_with_context(
+                level="info",
+                message="Pre-evaluation barrier sync",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            self._safe_barrier("pre_evaluation")
 
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
@@ -1210,6 +1277,10 @@ class Validator(BaseNode, Trainer):
             # Each rank generates its own random seed for dataloader
             random_seed = random.randint(1000, 10000000)
 
+            # ── Help pyright: predeclare locals used in arithmetic/logging
+            loss_before_random: float
+            n_batches: int
+
             # Loss before random data
             self.sampler.set_window_uid(random_seed, self.sync_window)
             loss_before_random, n_batches = await self.evaluate_model(
@@ -1220,7 +1291,7 @@ class Validator(BaseNode, Trainer):
             )
 
             # Track UIDs that were attempted to be evaluated this window
-            uids_attempted_this_window = set()
+            uids_attempted_this_window: set[int] = set()
 
             avg_loss_before_per_batch_own = 0.0
             avg_loss_after_per_batch_own = 0.0
@@ -1229,12 +1300,37 @@ class Validator(BaseNode, Trainer):
             evaluated_peers = 0
 
             # Synchronize all ranks before starting evaluation loop
-            if self.world_size > 1 and dist.is_initialized():
-                dist.barrier()
+            self._safe_barrier("pre_eval_loop")
 
+            # ── Help pyright in the UID loop
+            gradient_apply_time: float = 0.0
+            restore_time: float = 0.0
+            offload_time: float = 0.0
+            evaluation_time: float = 0.0
+            loss_before_own: float = 0.0
+            loss_after_own: float = 0.0
+            loss_after_random: float = 0.0
             # Use CPU offloading instead of deepcopy to save memory
             offload_start = tplr.T()
-            saved_state = self._save_model_state()
+            save_ok_local = True
+            try:
+                saved_state = self._save_model_state()
+            except Exception as e:
+                save_ok_local = False
+                tplr.log_with_context(
+                    level="error",
+                    message=f"Model state save failed: {e}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+                saved_state = None
+            save_ok_global = self._all_ok(save_ok_local, tag="save_model_state")
+            if not save_ok_global:
+                # keep all ranks aligned and skip this whole evaluation window
+                self._safe_barrier("bail_after_save_fail")
+                evaluation_time = tplr.T() - eval_start
+                self._safe_barrier("post_eval")
+                continue
             offload_time = tplr.T() - offload_start
 
             if self.is_master:
@@ -1329,14 +1425,33 @@ class Validator(BaseNode, Trainer):
                     continue
 
                 # Synchronize all ranks after gradient validation
-                if self.world_size > 1 and dist.is_initialized():
-                    dist.barrier()
+                self._safe_barrier("post_grad_validate")
 
                 # Loss before own data
-                self.sampler.set_window_uid(eval_uid, self.sync_window)
-                loss_before_own, n_batches = await self.evaluate_model(
-                    self.model, self.loader
+                eval_ok_local = True
+                try:
+                    self.sampler.set_window_uid(eval_uid, self.sync_window)
+                    loss_before_own, n_batches = await self.evaluate_model(
+                        self.model, self.loader
+                    )
+                except Exception as e:
+                    eval_ok_local = False
+                    tplr.log_with_context(
+                        level="error",
+                        message=f"evaluate_model (own/before) failed for UID {eval_uid}: {e}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
+                    )
+                eval_ok_global = self._all_ok(
+                    eval_ok_local, tag=f"own_before_uid_{eval_uid}"
                 )
+                if not eval_ok_global:
+                    # Align and skip this UID
+                    self._safe_barrier(tag=f"skip_uid_own_before_{eval_uid}")
+                    continue
+                # (if ok, loss_before_own/n_batches exist)
+
                 # evaluate_model now handles averaging across ranks
                 self.loss_before_per_batch_own = (
                     loss_before_own / n_batches if n_batches > 0 else 0
@@ -1367,10 +1482,11 @@ class Validator(BaseNode, Trainer):
                     )
 
                 # 9. Apply gradient and compute loss after
+                apply_ok_local = True
                 try:
                     gradient_apply_start = tplr.T()
                     self.update_model_with_gradient(
-                        self.model,  # Use original model directly
+                        self.model,
                         eval_uid,
                         state_dict,
                         clip_norm_dict,
@@ -1385,26 +1501,50 @@ class Validator(BaseNode, Trainer):
                             eval_uid=eval_uid,
                         )
                 except Exception as e:
-                    # All ranks will raise the same exception from update_model_with_gradient
-                    # so no need to broadcast
+                    apply_ok_local = False
                     if self.is_master:
                         self.slash_for_invalid_gradient(eval_uid, e)
 
-                    # Restore model to original state before continuing
+                # Reach group consensus before any barrier
+                apply_ok_global = self._all_ok(
+                    apply_ok_local, tag=f"apply_grad_uid_{eval_uid}"
+                )
+                if not apply_ok_global:
+                    # Restore and skip in lockstep
                     self._restore_model_state(saved_state)
+                    self._safe_barrier(tag=f"skip_uid_{eval_uid}")
                     continue
 
                 # Synchronize all ranks after gradient application
-                if self.world_size > 1 and dist.is_initialized():
-                    dist.barrier()
+                self._safe_barrier("post_apply_grad_uid")
 
                 # 10. Compute loss after gradient application on own data
                 self.outer_optimizer.zero_grad()
                 self.model.zero_grad()
                 self.sampler.set_window_uid(eval_uid, self.sync_window)
-                loss_after_own, n_batches = await self.evaluate_model(
-                    self.model, self.loader
+                eval_ok_local = True
+                try:
+                    loss_after_own, n_batches = await self.evaluate_model(
+                        self.model, self.loader
+                    )
+                except Exception as e:
+                    eval_ok_local = False
+                    tplr.log_with_context(
+                        level="error",
+                        message=f"evaluate_model (own/after) failed for UID {eval_uid}: {e}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
+                    )
+                eval_ok_global = self._all_ok(
+                    eval_ok_local, tag=f"own_after_uid_{eval_uid}"
                 )
+                if not eval_ok_global:
+                    # We already applied the peer's gradient; restore before skipping.
+                    self._restore_model_state(saved_state)
+                    self._safe_barrier(tag=f"skip_uid_own_after_{eval_uid}")
+                    continue
+
                 # evaluate_model now handles averaging across ranks
                 # Clean up stored batches
                 torch.cuda.empty_cache()
@@ -1456,16 +1596,36 @@ class Validator(BaseNode, Trainer):
                 self.model.zero_grad()
 
                 self.sampler.set_window_uid(random_seed, self.sync_window)
-                loss_after_random, n_batches = await self.evaluate_model(
-                    self.model,
-                    self.loader,
+                eval_ok_local = True
+                try:
+                    loss_after_random, n_batches = await self.evaluate_model(
+                        self.model,
+                        self.loader,
+                    )
+                except Exception as e:
+                    eval_ok_local = False
+                    tplr.log_with_context(
+                        level="error",
+                        message=f"evaluate_model (random/after) failed for UID {eval_uid}: {e}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
+                    )
+                eval_ok_global = self._all_ok(
+                    eval_ok_local, tag=f"random_after_uid_{eval_uid}"
                 )
+                if not eval_ok_global:
+                    self._restore_model_state(saved_state)
+                    self._safe_barrier(tag=f"skip_uid_random_after_{eval_uid}")
+                    continue
                 # evaluate_model now handles averaging across ranks
 
                 # Restore original model parameters from CPU
-                restore_start = tplr.T()
+                restore_start: float = tplr.T()
                 self._restore_model_state(saved_state)
                 restore_time = tplr.T() - restore_start
+                # restore_time is now always a float, never Unbound
+
                 if self.is_master:
                     tplr.log_with_context(
                         level="debug",
@@ -1614,8 +1774,7 @@ class Validator(BaseNode, Trainer):
                     )
 
                 # Synchronize all ranks at the end of each evaluation iteration
-                if self.world_size > 1 and dist.is_initialized():
-                    dist.barrier()
+                self._safe_barrier("end_eval_iter")
 
             del saved_state
             torch.cuda.empty_cache()
@@ -1636,7 +1795,9 @@ class Validator(BaseNode, Trainer):
 
                 # Log if some evaluations were skipped due to window exhaustion
                 if len(uids_attempted_this_window) < len(evaluation_uids):
-                    skipped_uids = set(evaluation_uids) - uids_attempted_this_window
+                    skipped_uids = list(
+                        set(evaluation_uids) - uids_attempted_this_window
+                    )
                     tplr.log_with_context(
                         level="info",
                         message=f"Window exhaustion: Skipped evaluation for UIDs {sorted(skipped_uids)}. Completed {len(uids_attempted_this_window)}/{len(evaluation_uids)} evaluations.",
@@ -1648,8 +1809,7 @@ class Validator(BaseNode, Trainer):
             evaluation_time = tplr.T() - eval_start
 
             # Barrier after evaluation completes
-            if self.world_size > 1 and dist.is_initialized():
-                dist.barrier()
+            self._safe_barrier("post_eval")
 
             # Perform logging
             if self.is_master:
@@ -1679,14 +1839,13 @@ class Validator(BaseNode, Trainer):
                     )
 
             # Add barrier before model update to ensure all ranks are ready
-            if self.world_size > 1 and dist.is_initialized():
-                tplr.log_with_context(
-                    level="info",
-                    message="Pre-model-update barrier sync",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                dist.barrier()
+            tplr.log_with_context(
+                level="info",
+                message="Pre-model-update barrier sync",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            self._safe_barrier("pre_model_update")
 
             # 14. Now, merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
@@ -1711,14 +1870,13 @@ class Validator(BaseNode, Trainer):
             )
 
             # Add barrier after model update to ensure all ranks complete the update
-            if self.world_size > 1 and dist.is_initialized():
-                tplr.log_with_context(
-                    level="info",
-                    message="Post-model-update barrier sync",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                dist.barrier()
+            tplr.log_with_context(
+                level="info",
+                message="Post-model-update barrier sync",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            self._safe_barrier("post_model_update")
 
             model_update_time = tplr.T() - update_start
             if self.is_master:
@@ -2012,8 +2170,7 @@ class Validator(BaseNode, Trainer):
             torch.cuda.empty_cache()
 
             # Synchronize all ranks before checkpoint
-            if self.world_size > 1 and dist.is_initialized():
-                dist.barrier()
+            self._safe_barrier("pre_checkpoint")
 
             # 17. Create checkpoints periodically
             if (
@@ -2043,8 +2200,7 @@ class Validator(BaseNode, Trainer):
                 )
 
             # Synchronize all ranks before moving to next window
-            if self.world_size > 1 and dist.is_initialized():
-                dist.barrier()
+            self._safe_barrier("pre_next_window")
 
             # 19. Increment global step
             self.global_step += 1
@@ -3045,6 +3201,7 @@ class Validator(BaseNode, Trainer):
         )
         ckpt_ok = ckpt_sync_win is not None
 
+        assert self.start_window is not None
         if ckpt_ok:
             tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
         else:

@@ -94,25 +94,17 @@ def test_roundtrip_decode_matches_original_permutation(device, N, C, K):
         shuffled = all_indices[torch.randperm(C, device=device)][:K]
         idx[i] = shuffled
 
-    payload, perm, meta = encode_batch_rows(idx, C=C)  # perm: [N, K]
+    payload, meta = encode_batch_rows(idx, C=C)
     rows, C2, N2 = decode_batch_rows(payload)
 
     assert C2 == C
     assert N2 == N
-    assert perm.shape == idx.shape
-    assert perm.dtype == torch.int64
-
-    # Check permutation -> decoded indices equality
+    # Check decoded indices set equality
     for i in range(N):
         decoded = rows[i]
         assert len(decoded) == K
-        # apply permutation (perm maps emitted-order position -> original topk position)
-        perm_i = perm[i].detach().cpu().tolist()
         orig = idx[i].detach().cpu().tolist()
-        reindexed = [orig[p] for p in perm_i]
-        assert decoded == reindexed, f"Row {i}: decoded != idx[perm]"
-
-        # set equality for good measure
+        # set equality - decoded values should match original, though order may differ
         assert sorted(decoded) == sorted(orig)
 
     # meta sanity
@@ -124,10 +116,9 @@ def test_roundtrip_decode_matches_original_permutation(device, N, C, K):
 
 
 @pytest.mark.parametrize("device", device_params())
-def test_permutation_reorders_values_correctly(device):
+def test_decode_preserves_indices(device):
     """
-    If we reorder values by 'perm' and scatter into C,
-    the dense reconstruction matches scattering with original (idx, values).
+    Test that decoded indices preserve the same set of values as original.
     """
     N, C, K = 5, 128, 8  # C=128 is divisible by both 64 and 128
     K = make_even_k(K)
@@ -135,23 +126,16 @@ def test_permutation_reorders_values_correctly(device):
     idx = torch.zeros((N, K), device=device, dtype=torch.int64)
     for i in range(N):
         idx[i] = torch.randperm(C, device=device, dtype=torch.int64)[:K]
-    values = torch.randn(N, K, device=device)
 
-    payload, perm, _ = encode_batch_rows(idx, C=C)
+    payload, _ = encode_batch_rows(idx, C=C)
     rows, C2, N2 = decode_batch_rows(payload)
     assert C2 == C and N2 == N
 
-    # original scatter
-    dense_a = scatter2d(idx, values, C)
-
-    # codec-order indices and values
-    dec_idx = torch.tensor(
-        [rows[i] for i in range(N)], device=device, dtype=torch.int64
-    )
-    vals_codec_order = values.gather(1, perm)  # reorder to the emission order
-    dense_b = scatter2d(dec_idx, vals_codec_order, C)
-
-    assert torch.allclose(dense_a, dense_b, atol=1e-6), "dense scatter mismatch"
+    # Check that decoded indices match original (set equality)
+    for i in range(N):
+        orig = idx[i].detach().cpu().tolist()
+        decoded = rows[i]
+        assert sorted(orig) == sorted(decoded), f"Row {i}: indices don't match"
 
 
 @pytest.mark.parametrize("device", device_params())
@@ -168,7 +152,7 @@ def test_cpu_reference_decoder_equivalence(device):
         idx[i] = torch.randperm(C, device=device, dtype=torch.int64)[:K]
 
     # new path
-    payload_new, perm_new, _ = encode_batch_rows(idx, C=C)
+    payload_new, _ = encode_batch_rows(idx, C=C)
     rows_new, Cn, Nn = decode_batch_rows(payload_new)
     assert Cn == C and Nn == N
     # ref path
@@ -178,15 +162,15 @@ def test_cpu_reference_decoder_equivalence(device):
     rows_ref, Cr, Nr = decode_batch_rows(payload_ref)
     assert Cr == C and Nr == N
 
-    # compare decoded rows (order must be the same since both encoders emit the same ordering)
+    # compare decoded rows - check set equality since order may differ
     for i in range(N):
-        assert rows_ref[i] == rows_new[i], f"row {i} decode differs (CPU ref vs new)"
-    # permutations must reorder original to decoded
+        assert sorted(rows_ref[i]) == sorted(rows_new[i]), (
+            f"row {i} decode differs (CPU ref vs new)"
+        )
+    # check that decoded values match original
     for i in range(N):
         orig = idx[i].detach().cpu().tolist()
-        perm_i = perm_new[i].detach().cpu().tolist()
-        reindexed = [orig[p] for p in perm_i]
-        assert reindexed == rows_new[i]
+        assert sorted(orig) == sorted(rows_new[i])
 
 
 # -------------------------------------------------------------------------
@@ -200,10 +184,9 @@ def test_zero_rows(device):
     K = make_even_k(K)
     idx = torch.empty(0, K, dtype=torch.int64, device=device)
 
-    payload, perm, meta = encode_batch_rows(idx, C=C)
+    payload, meta = encode_batch_rows(idx, C=C)
     rows, C2, N2 = decode_batch_rows(payload)
     assert C2 == C and N2 == 0
-    assert perm.shape == idx.shape
     assert rows == []
     assert "B_hist" in meta and sum(meta["B_hist"].values()) == 0
 
@@ -217,10 +200,9 @@ def test_zero_k(device):
     N, C, K = 3, 128, 0  # C=128 is divisible by both 64 and 128
     idx = torch.empty(N, K, dtype=torch.int64, device=device)
 
-    payload, perm, _ = encode_batch_rows(idx, C=C)
+    payload, _ = encode_batch_rows(idx, C=C)
     rows, C2, N2 = decode_batch_rows(payload)
     assert C2 == C and N2 == N
-    assert perm.shape == (N, 0)
     for i in range(N):
         assert rows[i] == []
 
@@ -239,7 +221,7 @@ def test_non_int64_indices_cast_ok(device):
         idx_64[i] = torch.randperm(C, device=device, dtype=torch.int64)[:K]
     idx = idx_64.to(torch.int32)
 
-    payload, perm, _ = encode_batch_rows(idx, C=C)
+    payload, _ = encode_batch_rows(idx, C=C)
     rows, C2, N2 = decode_batch_rows(payload)
     assert C2 == C and N2 == N
     for i in range(N):
@@ -290,7 +272,7 @@ def test_uses_bitmap_when_dense_within_subbucket():
     idx = torch.tensor(
         [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]], dtype=torch.int64
     )
-    payload, perm, _ = encode_batch_rows(idx, C=C, B_choices=(B,))
+    payload, _ = encode_batch_rows(idx, C=C, B_choices=(B,))
     C2, N2, row_len, lb, k_param, use_bitmap = parse_first_row_header(payload)
     assert (
         C2 == C and N2 == 1 and lb == int(math.ceil(math.log2(B)))
@@ -305,7 +287,7 @@ def test_uses_local_when_sparse_within_subbucket():
     """
     N, C, B = 1, 128, 64
     idx = torch.tensor([[0, 63]], dtype=torch.int64)  # very sparse within the block
-    payload, perm, _ = encode_batch_rows(idx, C=C, B_choices=(B,))
+    payload, _ = encode_batch_rows(idx, C=C, B_choices=(B,))
     C2, N2, row_len, lb, k_param, use_bitmap = parse_first_row_header(payload)
     assert (
         C2 == C and N2 == 1 and lb == int(math.ceil(math.log2(B)))
@@ -333,8 +315,8 @@ def test_cuda_vs_cpu_decode_equivalence():
         idx_cpu[i] = torch.randperm(C, device="cpu", dtype=torch.int64)[:K]
     idx_gpu = idx_cpu.to("cuda")
 
-    payload_cpu, perm_cpu, _ = encode_batch_rows(idx_cpu, C=C)
-    payload_gpu, perm_gpu, _ = encode_batch_rows(idx_gpu, C=C)
+    payload_cpu, _ = encode_batch_rows(idx_cpu, C=C)
+    payload_gpu, _ = encode_batch_rows(idx_gpu, C=C)
 
     rows_cpu, Cc, Nc = decode_batch_rows(payload_cpu)
     rows_gpu, Cg, Ng = decode_batch_rows(payload_gpu)

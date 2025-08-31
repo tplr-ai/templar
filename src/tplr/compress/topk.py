@@ -235,15 +235,10 @@ class TopKCompressor(Generic[Q]):
 
         # Flatten to [rows, k] for the codec
         idx2d = idx_int64.reshape(-1, topk).contiguous()
-        # GPU‑accelerated encode → bytes + permutation
-        payload, perm2d, _meta = encode_batch_rows(
+        # GPU‑accelerated encode → bytes
+        payload, _meta = encode_batch_rows(
             idx2d, C=totalk, B_choices=_DEFAULT_B_CHOICES
         )
-
-        # Reorder values to match emitted index order (so decode aligns)
-        val2d = val.reshape(-1, topk)
-        val2d = torch.gather(val2d, dim=1, index=perm2d.to(val2d.device))
-        val = val2d.reshape(*val.shape)
 
         idx_bytes = torch.tensor(
             np.frombuffer(payload, dtype=np.uint8).copy(),

@@ -307,7 +307,6 @@ class Validator(BaseNode, Trainer):
         self.previous_avg_loss_after_own = 0.0
         self.previous_avg_loss_before_random = 0.0
         self.previous_avg_loss_after_random = 0.0
-        self.valid_score_indices = []
 
         # Caching
         self.state_path = f"validator-state-{tplr.__version__}.pt"
@@ -2068,7 +2067,7 @@ class Validator(BaseNode, Trainer):
                     "validator/network/evaluated_uids": len(self.evaluated_uids),
                     "validator/optimizer/outer_lr": self.lr,
                     "validator/optimizer/inner_lr": current_inner_lr,
-                    "validator/network/active_miners": len(self.valid_score_indices),
+                    "validator/network/active_miners": len(self.comms.active_peers),
                     "validator/gather/success_rate": success_rate * 100,
                     "validator/timing/window_total": window_total_time,
                     "validator/timing/peer_update": peer_update_time,
@@ -2115,7 +2114,7 @@ class Validator(BaseNode, Trainer):
                         "evaluated_uids_count": int(len(self.evaluated_uids)),
                         "outer_lr": float(self.lr),
                         "inner_lr": float(current_inner_lr),
-                        "active_miners_count": int(len(self.valid_score_indices)),
+                        "active_miners_count": int(len(self.comms.active_peers)),
                         "gather_success_rate": gather_success_rate,
                         "window_total_time": float(window_total_time),
                         "peer_update_time": float(peer_update_time),

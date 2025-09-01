@@ -3,6 +3,10 @@ services:
     image: ghcr.io/tplr-ai/templar:latest
     container_name: templar-${NODE_TYPE:-miner}-${WALLET_HOTKEY}
     restart: unless-stopped
+    runtime: nvidia
+    ipc: host
+    cap_add:
+      - SYS_PTRACE
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
@@ -19,6 +23,9 @@ services:
       - NETUID=${NETUID:-3}
       - WANDB_API_KEY=${WANDB_API_KEY}
       - HOST_CUDA_VERSION=12.6
+      - TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+      - NCCL_DEBUG=INFO
+      - TORCH_DISTRIBUTED_DEBUG=DETAIL
       - R2_GRADIENTS_ACCOUNT_ID=${R2_GRADIENTS_ACCOUNT_ID}
       - R2_GRADIENTS_BUCKET_NAME=${R2_GRADIENTS_BUCKET_NAME}
       - R2_GRADIENTS_READ_ACCESS_KEY_ID=${R2_GRADIENTS_READ_ACCESS_KEY_ID}

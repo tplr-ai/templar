@@ -33,7 +33,6 @@ from typing import cast
 import bittensor as bt
 import numpy as np
 import torch
-import torch.distributed as dist
 import uvloop
 from torch.amp.grad_scaler import GradScaler
 from torch.distributed.tensor import DTensor as DT
@@ -41,6 +40,7 @@ from torch.distributed.tensor import DTensor as DT
 import tplr
 from neurons import BaseNode, Trainer
 from neurons.base_node import CPU_COUNT
+from tplr.distributed import dist_helper
 
 # GPU optimizations
 torch.manual_seed(42)
@@ -147,15 +147,6 @@ class Miner(BaseNode, Trainer):
 
         return config
 
-    @staticmethod
-    def should_continue(local_has_batch: bool, device) -> bool:
-        """
-        Synchronize across all ranks. If *any* rank runs out of batches, all must stop.
-        """
-        flag_tensor = torch.tensor([int(local_has_batch)], device=device)
-        dist.all_reduce(flag_tensor, op=dist.ReduceOp.MIN)
-        return bool(flag_tensor.item())
-
     def __init__(self):
         tplr.logger.debug("Starting initialization...")
 
@@ -164,27 +155,18 @@ class Miner(BaseNode, Trainer):
         # ---------------------------------------------------------------------
         # Distributed initialisation
         # ---------------------------------------------------------------------
-        self.rank = int(os.getenv("RANK", 0))
-        self.world_size = int(os.getenv("WORLD_SIZE", 1))
-        self.local_rank = int(os.getenv("LOCAL_RANK", 0))
-        tplr.logger.info(
-            f"[Init] rank={self.rank}, world_size={self.world_size}, local_rank={self.local_rank}"
-        )
+        dist_helper.init_process_group(backend="nccl", timeout_minutes=45)
+        self.rank = dist_helper.rank
+        self.world_size = dist_helper.world_size
+        self.local_rank = dist_helper.local_rank
+        self.is_master = dist_helper.is_master
 
-        if self.world_size >= 1:
-            dist.init_process_group(
-                backend="nccl",
-                init_method="env://",
-                timeout=timedelta(minutes=45),
-                rank=self.rank,
-                world_size=self.world_size,
-            )
-            torch.cuda.set_device(self.local_rank)
-            tplr.logger.info("[Init] NCCL process-group ready and GPU selected")
-            self.config.device = f"cuda:{self.local_rank}"
+        if dist_helper.device:
+            self.device = dist_helper.device
+            self.config.device = str(dist_helper.device)
         else:
             self.config.device = self.config.device or "cuda"
-        self.device = torch.device(self.config.device)
+            self.device = torch.device(self.config.device)
         tplr.logger.info(f"[Init] device set → {self.device}")
 
         # Mixed precision setup
@@ -198,8 +180,7 @@ class Miner(BaseNode, Trainer):
             f"[Init] Using {self.config.amp_dtype}. GradScaler enabled: {self.scaler.is_enabled()}"
         )
 
-        # Convenience flags
-        self.is_master = self.rank == 0
+        # Convenience flags - already set from dist_helper
         self.config.local = cast(bool, self.config.local)
         self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
 
@@ -311,8 +292,7 @@ class Miner(BaseNode, Trainer):
         self.bucket = self.comms.get_own_bucket("gradients", "read")
         if self.is_master:
             self.comms.try_commit(self.wallet, self.bucket)
-        if self.world_size > 1:
-            dist.barrier(device_ids=[self.local_rank])
+        dist_helper.safe_barrier("post_init", self.local_rank)
 
         # Init state params
         self.current_block = self.comms.subtensor.block
@@ -391,12 +371,13 @@ class Miner(BaseNode, Trainer):
 
             val = -1 if self.start_window is None else self.start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
-            dist.broadcast(tensor, src=0)
         else:
             tensor = torch.zeros(1, dtype=torch.long, device=self.device)
-            dist.broadcast(tensor, src=0)
-            val = tensor.item()
-            self.start_window = None if val == -1 else int(val)
+
+        dist_helper.broadcast(tensor, src=0)
+        val = tensor.item()
+        self.start_window = None if val == -1 else int(val)
+        assert self.start_window is not None
 
         self.global_step = self.current_window - self.start_window
         current_shard = self.global_step // self.windows_per_shard
@@ -404,11 +385,11 @@ class Miner(BaseNode, Trainer):
 
         if self.is_master:
             _ = await self.dataset_manager.initialize_datasets(current_shard)
-            dist.barrier(device_ids=[self.local_rank])
+            dist_helper.safe_barrier("post_dataset_init_master", self.local_rank)
 
         else:
             # barrier to start so that master finalized the dataset download
-            dist.barrier(device_ids=[self.local_rank])
+            dist_helper.safe_barrier("wait_for_dataset_init", self.local_rank)
             await self.dataset_manager.initialize_datasets(current_shard)
 
         # All workers need to instantiate dataloader
@@ -502,8 +483,7 @@ class Miner(BaseNode, Trainer):
                 tplr.logger.info(f"Swapping dataset at window {step_window}")
                 await self.dataset_manager.swap_datasets()
                 self.set_dataloader()
-                if self.world_size > 1:
-                    dist.barrier(device_ids=[self.local_rank])
+                dist_helper.safe_barrier("sync_shard_switch", self.local_rank)
 
             data_loading_time = tplr.T() - data_start
             tplr.logger.info(
@@ -539,8 +519,7 @@ class Miner(BaseNode, Trainer):
             )
 
             # Synchronise all ranks
-            if self.world_size > 1:
-                dist.barrier(device_ids=[self.local_rank])
+            dist_helper.safe_barrier("pre_gather", self.local_rank)
 
             # 1️⃣ every rank builds its momentum shard
             compress_start = tplr.T()
@@ -554,15 +533,11 @@ class Miner(BaseNode, Trainer):
             )
 
             # gather the shards → rank-0
-            if self.world_size > 1:
-                gathered = [None] * self.world_size
-                dist.gather_object(  # NCCL / Gloo friendly
-                    shard_gradient,
-                    gathered if self.is_master else None,
-                    dst=0,
-                )
-            else:  # single-GPU run
-                gathered = [shard_gradient]
+            gathered = dist_helper.gather_object(
+                shard_gradient,
+                object_list=[None] * self.world_size if self.is_master else None,
+                dst=0,
+            )
 
             # ------------------------------------------------------------
             #  rank-0 merges & uploads the full gradient
@@ -570,6 +545,7 @@ class Miner(BaseNode, Trainer):
             gradient = {}
             processed_state_dict = {}
             if self.is_master:
+                assert gathered is not None
                 for i, shard in enumerate(gathered):
                     if shard is not None:
                         gradient.update(shard)
@@ -637,8 +613,7 @@ class Miner(BaseNode, Trainer):
                     del gathered  # Free gathered list on non-master ranks too
 
             tplr.logger.info(f"Stopped accumulating: {n_batches} batches")
-            if self.world_size > 1:
-                dist.barrier(device_ids=[self.local_rank])
+            dist_helper.safe_barrier("post_gather", self.local_rank)
 
             sync_block = self.current_window * self.hparams.blocks_per_window
             ts_value = await self.loop.run_in_executor(
@@ -765,11 +740,7 @@ class Miner(BaseNode, Trainer):
             local_mom_norms: list[float] = [
                 m.norm().item() for m in self.error_feedback.values()
             ]
-            if self.world_size > 1:
-                gathered_mom: list[list[float]] = [None] * self.world_size  # type: ignore[var-annotated]
-                dist.all_gather_object(gathered_mom, local_mom_norms)
-            else:
-                gathered_mom = [local_mom_norms]
+            gathered_mom = dist_helper.all_gather_object(local_mom_norms)
 
             momentum_norms = []
             # Log metrics to WandB
@@ -857,8 +828,7 @@ class Miner(BaseNode, Trainer):
             self.global_step += 1
             tplr.logger.info(f"Total optimization steps: {self.global_step}")
 
-            if self.world_size > 1:
-                dist.barrier(device_ids=[self.local_rank])
+            dist_helper.safe_barrier("post_outer_step", self.local_rank)
 
             # Delete any remaining local variables to clear up memory
             del shard_gradient
@@ -873,31 +843,6 @@ class Miner(BaseNode, Trainer):
             # 4. Wait for next window
             tplr.logger.info("Wait for next window...")
             await self.wait_until_window(step_window + 1)
-
-    def _get_offloaded_param(self):
-        """Get a copy of current parameters and offload them to CPU"""
-        params_offloaded = []
-        param_info = []  # Store DTensor info for restoration
-
-        for param in self.bare_model.parameters():
-            if isinstance(param, DT):
-                # Get the local TP shard and store the spec
-                local_param = param.to_local()
-                params_offloaded.append(local_param.detach().clone().to("cpu"))
-                param_info.append(
-                    {  # Store the DTensor placement info
-                        "is_dtensor": True,
-                        "device_mesh": param.device_mesh,
-                        "placements": param.placements,
-                        "local_shape": local_param.shape,
-                    }
-                )
-            else:
-                # For regular tensors
-                params_offloaded.append(param.data.detach().clone().to("cpu"))
-                param_info.append({"is_dtensor": False})
-
-        return params_offloaded, param_info
 
     async def cleanup_window(self):
         """Aggressive memory cleanup between windows"""

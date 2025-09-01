@@ -351,7 +351,6 @@ class Evaluator:
         if self.config.tasks:
             self.task_list = self.config.tasks.split(",")
 
-
     async def update_state(self) -> None:
         """
         Refresh the metagraph and bucket information.
@@ -608,9 +607,7 @@ class Evaluator:
         """
         self.comms.commitments = await self.comms.get_commitments()
         self.comms.update_peers_with_buckets()
-        start_window = (
-            await self.comms.get_start_window(version=self.version) 
-        )
+        start_window = await self.comms.get_start_window(version=self.version)
 
         if self.is_master:
             block_number_list = []
@@ -627,7 +624,7 @@ class Evaluator:
         # Broadcast the block number from master to all other nodes
         dist.broadcast_object_list(block_number_list, src=0)
         block_number = block_number_list[0]
-        plr.logger.info(f"Looking for new checkpoint (block: {block_number})")
+        tplr.logger.info(f"Looking for new checkpoint (block: {block_number})")
 
         (success, checkpoint_window) = await self.load_latest_model()
 
@@ -676,7 +673,6 @@ class Evaluator:
         )
 
         if self.task_list:
-        
             # All ranks should clear cache
             tplr.logger.info(f"Clearing GPU cache, {self.local_rank}")
             torch.cuda.empty_cache()
@@ -946,9 +942,7 @@ class Evaluator:
             if self.is_master:
                 await self.update_state()
                 latest_block = self.comms.subtensor.get_current_block()
-                start_window = (
-                    await self.comms.get_start_window(version=self.version)
-                )
+                start_window = await self.comms.get_start_window(version=self.version)
 
                 should_evaluate = start_window is not None and (
                     latest_block > self.last_block_number

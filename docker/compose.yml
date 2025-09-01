@@ -7,6 +7,7 @@ services:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
       - ./${DATASET_BINS_PATH:-remote/tokenized}:/app/${DATASET_BINS_PATH:-remote/tokenized}
+      - ./checkpoints:/app/checkpoints
 
     environment:
       - NODE_TYPE=${NODE_TYPE:-miner}
@@ -53,6 +54,7 @@ services:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
       - ./${CUSTOM_EVAL_PATH:-eval_dataset}:/app/${CUSTOM_EVAL_PATH:-eval_dataset}
+      - ./checkpoints:/app/checkpoints
     runtime: nvidia
     environment:
       - NODE_TYPE=evaluator

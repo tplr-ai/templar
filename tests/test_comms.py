@@ -884,95 +884,6 @@ async def test_download_large_file(comms_instance):
     mock_client.get_object.assert_called()
 
 
-# Test Checkpoint Operations
-
-
-@pytest.mark.asyncio
-async def test_load_checkpoint_success(monkeypatch):
-    """
-    Verifies that `load_checkpoint`:
-      • accepts the correct positional/keyword args
-      • returns exactly five values
-      • propagates the momentum & sync_window fields from the checkpoint
-    """
-    comms = Comms.__new__(Comms)
-    comms.wallet = MagicMock()
-
-    # Mock distributed functions to avoid initialization errors
-    monkeypatch.setattr("torch.distributed.is_available", lambda: False)
-    monkeypatch.setattr("torch.distributed.is_initialized", lambda: False)
-
-    # Mock set_model_state_dict to avoid distributed operations
-    mock_set_state_dict = MagicMock()
-    monkeypatch.setattr("tplr.comms.set_model_state_dict", mock_set_state_dict)
-
-    # --- Build a tiny, real model, optimiser & scheduler -------------------
-    model = torch.nn.Linear(4, 2)
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
-
-    # --- Fake checkpoint data in exactly the structure the impl expects ----
-    checkpoint_data = {
-        "model_state_dict": model.state_dict(),
-        "start_window": 0,
-        "current_window": 1,
-        "sync_window": 7,  # any int works
-    }
-
-    # get_latest_checkpoint -> (checkpoint_data, checkpoint_window)
-    # It's called with init_version, so the mock needs to accept it.
-    async def _fake_get_latest_checkpoint(version: str):
-        # TODO: Consider asserting the value of 'version' if it's important for the test logic.
-        return checkpoint_data, 1
-
-    monkeypatch.setattr(comms, "get_latest_checkpoint", _fake_get_latest_checkpoint)
-
-    # --- Call & unpack (must be 2 returns) ---------------------------------
-    success, sync_window = await comms.load_checkpoint(
-        model=model,
-        current_window=1,
-    )
-
-    # --- Assertions --------------------------------------------------------
-    assert success is True
-    assert sync_window == 7
-
-
-@pytest.mark.asyncio
-async def test_load_checkpoint_missing_data(comms_instance):
-    """Test 16: Verify checkpoint loading with missing data
-
-    Tests the checkpoint loading behavior when data is missing.
-    Checks:
-    - Proper handling of missing checkpoint data
-    - Default value returns
-    - Error handling
-    - State preservation
-    """
-    # Mock the get_latest_checkpoint method to return None without error
-    comms_instance.get_latest_checkpoint = AsyncMock(return_value=None)
-
-    # Mock get_validator_with_highest_stake to avoid bucket access
-    comms_instance.get_validator_with_highest_stake = AsyncMock(return_value=(0, 1.0))
-
-    # Create mock model and optimizer
-    mock_model = MagicMock()
-    mock_optimizer = MagicMock()
-    mock_scheduler = MagicMock()
-
-    # load_checkpoint returns: success, sync_window
-    (
-        success,
-        sync_window,
-    ) = await comms_instance.load_checkpoint(
-        model=mock_model,
-        current_window=1,
-    )
-
-    assert not success
-    assert sync_window == 0
-
-
 async def test_gather_timeout(comms_instance, dummy_compressor):
     """Test gather operation with timeout"""
 
@@ -2827,58 +2738,6 @@ async def test_gather_with_reserve(comms_instance):
 
 
 @pytest.mark.asyncio
-async def test_cleanup_old_checkpoints(comms_instance):
-    """Test the cleanup_old_checkpoints method."""
-    comms_instance.bucket = comms_instance.get_own_bucket("gradients", "write")
-    with patch.object(comms_instance, "_get_s3_client") as mock_get_s3_client:
-        # Use MagicMock for the client so we can control its methods
-        mock_s3_client = MagicMock()
-        mock_s3_client.delete_objects = AsyncMock()  # This method is async
-        mock_get_s3_client.return_value = mock_s3_client
-
-        # Correctly mock the async paginator
-        class AsyncPaginator:
-            def __init__(self, contents):
-                self.contents = contents
-
-            async def __aiter__(self):
-                yield self.contents
-
-        paginator_contents = {
-            "Contents": [
-                {
-                    "Key": "checkpoint-1",
-                    "LastModified": datetime.now(timezone.utc) - timedelta(days=3),
-                },
-                {
-                    "Key": "checkpoint-2",
-                    "LastModified": datetime.now(timezone.utc) - timedelta(days=2),
-                },
-                {
-                    "Key": "checkpoint-3",
-                    "LastModified": datetime.now(timezone.utc) - timedelta(days=1),
-                },
-                {"Key": "checkpoint-4", "LastModified": datetime.now(timezone.utc)},
-            ]
-        }
-
-        mock_paginator = MagicMock()
-        mock_paginator.paginate.return_value = AsyncPaginator(paginator_contents)
-        # get_paginator is a synchronous method that returns the paginator object
-        mock_s3_client.get_paginator.return_value = mock_paginator
-
-        await comms_instance.cleanup_old_checkpoints(keep_last=2)
-
-        mock_s3_client.delete_objects.assert_called_once()
-        deleted_objects = mock_s3_client.delete_objects.call_args[1]["Delete"][
-            "Objects"
-        ]
-        assert len(deleted_objects) == 2
-        deleted_keys = {obj["Key"] for obj in deleted_objects}
-        assert deleted_keys == {"checkpoint-1", "checkpoint-2"}
-
-
-@pytest.mark.asyncio
 async def test_post_peer_list(comms_instance):
     """Test the post_peer_list method."""
     peers = [1, 2, 3]
@@ -2942,45 +2801,6 @@ async def test_post_start_window(comms_instance):
         with open(file_path, "r") as f:
             data = json.load(f)
             assert data["start_window"] == start_window
-
-
-@pytest.mark.asyncio
-async def test_get_bucket_checkpoint(comms_instance):
-    """Test the _get_bucket_checkpoint method."""
-    bucket = comms_instance.get_own_bucket("gradients", "read")
-    uid = 0
-    version = tplr.__version__
-
-    with patch.object(comms_instance, "_get_s3_client") as mock_get_s3_client:
-        mock_s3_client = AsyncMock()
-        mock_get_s3_client.return_value = mock_s3_client
-
-        # Mock list_objects_v2 to return a checkpoint file
-        mock_s3_client.list_objects_v2.return_value = {
-            "Contents": [
-                {"Key": f"checkpoint-10-{uid}-v{version}.pt"},
-                {"Key": f"checkpoint-5-{uid}-v{version}.pt"},
-            ],
-            "IsTruncated": False,
-        }
-
-        # Mock s3_get_object to return checkpoint data
-        checkpoint_data = {
-            "model_state_dict": {"param1": torch.tensor(1)},
-            "window": 10,
-        }
-        with patch.object(
-            comms_instance, "s3_get_object", return_value=checkpoint_data
-        ):
-            result = await comms_instance._get_bucket_checkpoint(bucket, uid, version)
-
-            assert result is not None
-            data, window = result
-            assert window == 10
-            assert data is not None
-            assert data["window"] == 10
-            assert "model_state_dict" in data
-            assert torch.equal(data["model_state_dict"]["param1"], torch.tensor(1))
 
 
 @pytest.mark.asyncio
@@ -3072,49 +2892,6 @@ async def test_get_peer_list(comms_instance):
         }
         result = await comms_instance.get_peer_list()
         assert result is None
-
-
-@pytest.mark.asyncio
-async def test_save_checkpoint(comms_instance, model, optimizer, scheduler):
-    """Test the save_checkpoint method."""
-    momentum = {"param1": torch.tensor(0.1)}
-    global_step = 100
-    current_window = 10
-    start_window = 1
-
-    with patch.object(comms_instance, "put", new_callable=AsyncMock) as mock_put:
-        result = await comms_instance.save_checkpoint(
-            model,
-            optimizer,
-            scheduler,
-            momentum,
-            global_step,
-            current_window,
-            start_window,
-        )
-
-        assert result is True
-        assert mock_put.call_count == 2
-
-        # Check the call for local=True
-        local_call = mock_put.call_args_list[0]
-        assert local_call.kwargs["local"] is True
-        assert local_call.kwargs["key"] == "checkpoint"
-        assert local_call.kwargs["uid"] == str(comms_instance.uid)
-        assert local_call.kwargs["window"] == current_window
-        assert local_call.kwargs["global_step"] == global_step
-
-        checkpoint_data = local_call.kwargs["state_dict"]
-        assert "model_state_dict" in checkpoint_data
-        assert "optimizer_state_dict" in checkpoint_data
-        assert "scheduler_state_dict" in checkpoint_data
-        assert "momentum" in checkpoint_data
-        assert "start_window" in checkpoint_data
-        assert "current_window" in checkpoint_data
-
-        # Check the call for local=False
-        remote_call = mock_put.call_args_list[1]
-        assert remote_call.kwargs["local"] is False
 
 
 @pytest.mark.asyncio

@@ -35,15 +35,10 @@ import bittensor as bt
 import boto3
 import botocore
 import torch
-import torch.distributed as dist
 from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError, ConnectionClosedError
-from torch.distributed.checkpoint.state_dict import (
-    StateDictOptions,
-    set_model_state_dict,
-)
 from tqdm import tqdm as std_tqdm
 
 import tplr
@@ -632,8 +627,12 @@ class Comms(ChainManager):
     #  Large File Operations
 
     async def upload_large_file(
-        self, file_path: str, key: str, s3_client, bucket: Bucket | None = None
-    ):
+        self,
+        file_path: str,
+        key: str,
+        s3_client: Any,
+        bucket: Bucket | None = None,
+    ) -> None:
         """
         Uploads a large file to S3 using a robust, asynchronous multipart strategy.
 
@@ -653,107 +652,238 @@ class Comms(ChainManager):
             Exception: Propagates exceptions from the S3 client if the upload
                 fails after multiple retries.
         """
-        upload_id = None
-        MAX_RETRIES = 3
-        file_size_gb = os.path.getsize(file_path) / (1024 * 1024 * 1024)
-        if file_size_gb > 10:
-            part_size = 128 * 1024 * 1024
-        elif file_size_gb > 1:
-            part_size = 64 * 1024 * 1024
-        else:
-            part_size = 32 * 1024 * 1024
+        # ---- parameters & helpers -------------------------------------------
+        bucket = bucket or self.bucket
+        file_size = os.path.getsize(file_path)
 
-        if bucket is None:
-            bucket = self.bucket
-        try:
-            async with self.client_semaphore:
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        response = await s3_client.create_multipart_upload(
+        # Keep parts under ~9k to stay safely below the 10k S3 limit
+        MIN_PART = 64 * 1024 * 1024  # 64 MiB (S3 min is 5 MiB; use 64 MiB alignment)
+        MAX_PARTS = 9000
+        part_size = max(MIN_PART, math.ceil(file_size / MAX_PARTS))
+        # Round up to 8 MiB alignment for nicer server-side buffering
+        part_size = ((part_size + MIN_PART - 1) // MIN_PART) * MIN_PART
+
+        # Optional overrides via env for tuning
+        part_size = int(os.getenv("TPLR_S3_PART_SIZE", part_size))
+        # Concurrency local to this MPU; also gated by self.client_semaphore
+        concurrency = int(os.getenv("TPLR_S3_CONCURRENCY", "32"))
+        concurrency = max(2, min(concurrency, 32))
+
+        MAX_RETRIES = 5
+        JITTER = 0.1
+
+        def _b64_md5(data: bytes) -> str:
+            return base64.b64encode(__import__("hashlib").md5(data).digest()).decode()
+
+        total_parts = max(1, math.ceil(file_size / part_size))
+        tplr.logger.info(
+            f"[S3][MPU] start key={key} size={file_size}B "
+            f"parts={total_parts} part_size={part_size}B concurrency={concurrency}"
+        )
+
+        # ---- helpers ---------------------------------------------------------
+        async def _create_mpu() -> str:
+            for attempt in range(MAX_RETRIES):
+                try:
+                    async with self.client_semaphore:
+                        resp = await s3_client.create_multipart_upload(
                             Bucket=bucket.name, Key=key
                         )
-                        upload_id = response["UploadId"]
-                        break
-                    except Exception:
-                        if attempt == MAX_RETRIES - 1:
-                            raise
-                        await asyncio.sleep(2**attempt)
-
-                file_size = os.path.getsize(file_path)
-                total_parts = math.ceil(file_size / part_size)
-                parts = []
-
-                async def upload_part(part_number: int):
-                    byte_range_start = (part_number - 1) * part_size
-                    byte_range_end = min(byte_range_start + part_size, file_size)
-
-                    for attempt in range(MAX_RETRIES):
-                        try:
-                            async with aiofiles.open(file_path, "rb") as f:
-                                await f.seek(byte_range_start)
-                                data = await f.read(byte_range_end - byte_range_start)
-
-                            response = await s3_client.upload_part(
-                                Bucket=bucket.name,
-                                Key=key,
-                                PartNumber=part_number,
-                                UploadId=upload_id,
-                                Body=data,
-                            )
-                            return {
-                                "ETag": response["ETag"],
-                                "PartNumber": part_number,
-                            }
-                        except Exception as e:
-                            if attempt == MAX_RETRIES - 1:
-                                tplr.logger.error(
-                                    f"Failed to upload part {part_number} after {MAX_RETRIES} attempts: {e}"
-                                )
-                                raise
-                            await asyncio.sleep(2**attempt)
-
-                # Launch one coroutine per part
-                try:
-                    part_results = await asyncio.gather(
-                        *[
-                            upload_part(part_number)
-                            for part_number in range(1, total_parts + 1)
-                        ]
-                    )
-                    parts.extend(part_results)
+                    return resp["UploadId"]
                 except Exception as e:
-                    tplr.logger.error(f"Multipart upload failed: {e}")
-                    raise
+                    if attempt == MAX_RETRIES - 1:
+                        raise
+                    backoff = (2**attempt) + random.random() * JITTER
+                    tplr.logger.warning(
+                        f"[S3][MPU] create failed (attempt {attempt + 1}) – retrying in {backoff:.2f}s: {e}"
+                    )
+                    await asyncio.sleep(backoff)
+            raise RuntimeError("unreachable")
 
-                parts.sort(key=lambda x: x["PartNumber"])
-
-                for attempt in range(MAX_RETRIES):
-                    try:
+        async def _complete_mpu(upload_id: str, parts: list[dict[str, object]]) -> None:
+            for attempt in range(MAX_RETRIES):
+                try:
+                    async with self.client_semaphore:
                         await s3_client.complete_multipart_upload(
                             Bucket=bucket.name,
                             Key=key,
                             UploadId=upload_id,
                             MultipartUpload={"Parts": parts},
                         )
-                        tplr.logger.info(f"Successfully uploaded {key}")
-                        break
-                    except Exception:
-                        if attempt == MAX_RETRIES - 1:
-                            raise
-                        await asyncio.sleep(2**attempt)
+                    tplr.logger.info(f"[S3][MPU] complete ok key={key}")
+                    return
+                except Exception as e:
+                    if attempt == MAX_RETRIES - 1:
+                        raise
+                    backoff = (2**attempt) + random.random() * JITTER
+                    tplr.logger.warning(
+                        f"[S3][MPU] complete failed (attempt {attempt + 1}) – retrying in {backoff:.2f}s: {e}"
+                    )
+                    await asyncio.sleep(backoff)
 
-        except (ConnectionClosedError, ClientError):
-            await self._purge_s3_client(bucket)
-        except Exception as e:
-            tplr.logger.error(f"Error during multipart upload of {key}: {e}")
-            if upload_id:
-                try:
+        async def _abort_mpu(upload_id: str) -> None:
+            try:
+                async with self.client_semaphore:
                     await s3_client.abort_multipart_upload(
                         Bucket=bucket.name, Key=key, UploadId=upload_id
                     )
-                except Exception as abort_e:
-                    tplr.logger.error(f"Failed to abort multipart upload: {abort_e}")
-            raise
+                tplr.logger.info(f"[S3][MPU] aborted key={key} upload_id={upload_id}")
+            except Exception as e:
+                tplr.logger.warning(f"[S3][MPU] abort failed: {e}")
+
+        # ---- outer restart loop (for NoSuchUpload) ---------------------------
+        upload_attempt = 0
+        while True:
+            upload_attempt += 1
+            start_all = time.perf_counter()
+            uploaded_bytes = 0
+            uploaded_lock = asyncio.Lock()
+
+            upload_id = await _create_mpu()
+            tplr.logger.info(
+                f"[S3][MPU] created key={key} upload_id={upload_id} (attempt {upload_attempt})"
+            )
+
+            # Work queue of part numbers
+            q: asyncio.Queue[int] = asyncio.Queue()
+            for pn in range(1, total_parts + 1):
+                q.put_nowait(pn)
+
+            cancel_event = asyncio.Event()
+            parts_done: dict[int, str] = {}
+            errors: list[BaseException] = []
+
+            async def _worker(wid: int) -> None:
+                nonlocal uploaded_bytes
+                while not cancel_event.is_set():
+                    try:
+                        pn = await asyncio.wait_for(q.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if q.empty():
+                            return
+                        continue
+
+                    byte_start = (pn - 1) * part_size
+                    byte_end = min(byte_start + part_size, file_size)
+                    size = byte_end - byte_start
+
+                    for attempt in range(MAX_RETRIES):
+                        try:
+                            async with aiofiles.open(file_path, "rb") as f:
+                                await f.seek(byte_start)
+                                data = await f.read(size)
+
+                            headers = {"ContentMD5": _b64_md5(data)}
+                            t0 = time.perf_counter()
+                            async with self.client_semaphore:
+                                resp = await s3_client.upload_part(
+                                    Bucket=bucket.name,
+                                    Key=key,
+                                    PartNumber=pn,
+                                    UploadId=upload_id,
+                                    Body=data,
+                                    **headers,
+                                )
+                            dt = time.perf_counter() - t0
+                            async with uploaded_lock:
+                                uploaded_bytes += size
+                            parts_done[pn] = resp["ETag"]
+                            speed = (size / (1024 * 1024)) / max(dt, 1e-6)
+                            tplr.logger.debug(
+                                f"[S3][MPU] ↑ part {pn}/{total_parts} "
+                                f"{size / 1024 / 1024:.2f} MiB in {dt:.2f}s ({speed:.2f} MiB/s) "
+                                f"[worker {wid}]"
+                            )
+                            break
+                        except ClientError as e:
+                            code = e.response.get("Error", {}).get("Code")
+                            if code == "NoSuchUpload":
+                                # The MPU has been invalidated; request a restart.
+                                cancel_event.set()
+                                errors.append(e)
+                                tplr.logger.warning(
+                                    f"[S3][MPU] part {pn} got NoSuchUpload – restarting MPU"
+                                )
+                                break
+                            if attempt == MAX_RETRIES - 1:
+                                cancel_event.set()
+                                errors.append(e)
+                                tplr.logger.error(
+                                    f"[S3][MPU] part {pn} failed after {MAX_RETRIES} attempts: {e}"
+                                )
+                                break
+                            backoff = (2**attempt) + random.random() * JITTER
+                            await asyncio.sleep(backoff)
+                        except (
+                            EndpointConnectionError,
+                            ClientOSError,
+                            ServerDisconnectedError,
+                            asyncio.TimeoutError,
+                        ) as e:
+                            if attempt == MAX_RETRIES - 1:
+                                cancel_event.set()
+                                errors.append(e)
+                                tplr.logger.error(
+                                    f"[S3][MPU] part {pn} network failure after {MAX_RETRIES} attempts: {e}"
+                                )
+                                break
+                            backoff = (2**attempt) + random.random() * JITTER
+                            await asyncio.sleep(backoff)
+                        except Exception as e:
+                            cancel_event.set()
+                            errors.append(e)
+                            tplr.logger.error(
+                                f"[S3][MPU] part {pn} unexpected error: {e}"
+                            )
+                            break
+                    q.task_done()
+
+            workers = [asyncio.create_task(_worker(i)) for i in range(concurrency)]
+            await q.join()
+            cancel_event.set()
+            await asyncio.gather(*workers, return_exceptions=True)
+
+            dt_all = time.perf_counter() - start_all
+            mb = uploaded_bytes / (1024 * 1024)
+            tplr.logger.info(
+                f"[S3][MPU] uploaded ~{mb:.2f} MiB in {dt_all:.2f}s "
+                f"(~{(mb / dt_all) if dt_all > 0 else 0:.2f} MiB/s) key={key}"
+            )
+
+            # If we saw a fatal error (e.g., NoSuchUpload), abort and restart.
+            if errors:
+                await _abort_mpu(upload_id)
+                if any(
+                    isinstance(e, ClientError)
+                    and e.response.get("Error", {}).get("Code") == "NoSuchUpload"
+                    for e in errors
+                ):
+                    if upload_attempt < 3:
+                        tplr.logger.warning(
+                            f"[S3][MPU] restarting MPU for key={key} (attempt {upload_attempt + 1})"
+                        )
+                        continue
+                # Otherwise propagate the first error.
+                raise errors[0]
+
+            # Complete MPU
+            if len(parts_done) != total_parts:
+                await _abort_mpu(upload_id)
+                raise RuntimeError(
+                    f"[S3][MPU] missing parts: have {len(parts_done)} expected {total_parts}"
+                )
+
+            parts_for_complete = [
+                {"PartNumber": pn, "ETag": parts_done[pn]} for pn in sorted(parts_done)
+            ]
+            try:
+                await _complete_mpu(upload_id, parts_for_complete)
+                return
+            except Exception as e:
+                # best effort cleanup, then rethrow
+                await _abort_mpu(upload_id)
+                raise
+        # end while
 
     async def _upload_large_file_via_boto3(
         self, file_path: str, key: str, bucket: Bucket
@@ -1120,7 +1250,7 @@ class Comms(ChainManager):
         self,
         state_dict: dict[str, Any],
         window: int,
-        key: Literal["checkpoint", "debug", "gradient", "aggregator"],
+        key: Literal["debug", "gradient", "aggregator"],
         uid: str | None = None,
         global_step: int = 0,
         local: bool = True,
@@ -1175,13 +1305,10 @@ class Comms(ChainManager):
 
         try:
             # Prepare the data to be saved
-            if key == "checkpoint":
-                save_data = state_dict
-            else:
-                save_data = {
-                    "state_dict": state_dict,
-                    "global_step": global_step,
-                }
+            save_data = {
+                "state_dict": state_dict,
+                "global_step": global_step,
+            }
 
             # Save to temp file
             await asyncio.to_thread(torch.save, save_data, temp_file_path)
@@ -1248,7 +1375,7 @@ class Comms(ChainManager):
         self,
         uid: str,
         window: int,
-        key: Literal["checkpoint", "debug", "gradient", "aggregator"],
+        key: Literal["debug", "gradient", "aggregator"],
         local: bool = True,
         stale_retention: int = 10,
         timeout: int = 30,
@@ -1300,8 +1427,6 @@ class Comms(ChainManager):
                     tplr.logger.debug(f"Local file not found: {local_path}")
                     return CommsGetResult(status="NOT_FOUND")
                 loaded_data = torch.load(local_path, weights_only=True)
-                if key == "checkpoint":
-                    return CommsGetResult(data=loaded_data)
                 state_dict = loaded_data.get("state_dict")
                 global_step = loaded_data.get("global_step", 0)
                 return CommsGetResult(data=state_dict, global_step=global_step)
@@ -1348,9 +1473,6 @@ class Comms(ChainManager):
                         f"Object for UID {uid}, window {window}, key {key} was uploaded too early. Skipping."
                     )
                     return CommsGetResult(status="TOO_EARLY")
-
-            if key == "checkpoint":
-                return CommsGetResult(data=loaded_data)
 
             state_dict = loaded_data.get("state_dict")
             global_step = loaded_data.get("global_step", 0)
@@ -1902,39 +2024,6 @@ class Comms(ChainManager):
         )
         return primary
 
-    async def cleanup_old_checkpoints(self, keep_last: int = 3) -> None:
-        """
-        Removes old checkpoints from storage, keeping only the most recent ones.
-        """
-        try:
-            s3_client = await self._get_s3_client(self.bucket)
-
-            paginator = s3_client.get_paginator("list_objects_v2")  # type: ignore
-            checkpoint_files: list[dict[str, Any]] = []
-
-            async for page in paginator.paginate(
-                Bucket=self.bucket.name, Prefix="checkpoint"
-            ):
-                for obj in page.get("Contents", {}):
-                    if obj.get("Key", "").startswith("checkpoint"):
-                        checkpoint_files.append(obj)
-
-            checkpoint_files.sort(key=lambda x: x["LastModified"], reverse=True)
-
-            if len(checkpoint_files) > keep_last:
-                to_delete = checkpoint_files[keep_last:]
-                await s3_client.delete_objects(
-                    Bucket=self.bucket.name,
-                    Delete={"Objects": [{"Key": obj["Key"]} for obj in to_delete]},
-                )
-                tplr.logger.info(f"Deleted {len(to_delete)} old checkpoints")
-
-        except (ConnectionClosedError, ClientError):
-            await self._purge_s3_client(self.bucket)
-            return
-        except Exception as e:
-            tplr.logger.error(f"Error cleaning up old checkpoints: {e}")
-
     ## Peer Management
 
     async def is_miner_active(self, uid: int, recent_windows: int = 3) -> bool:
@@ -2041,8 +2130,6 @@ class Comms(ChainManager):
 
             await asyncio.sleep(self.active_check_interval)
 
-    # Checkpoint Operations
-
     async def _get_highest_stake_validator_bucket(self):
         """
         Retrieves the bucket information for the validator with the highest stake.
@@ -2071,200 +2158,6 @@ class Comms(ChainManager):
 
         tplr.logger.info(f"Validator Bucket: {validator_bucket}")
         return validator_bucket, validator_uid
-
-    async def get_latest_checkpoint(self, version: str) -> tuple[Any, int] | None:
-        """
-        Retrieves the latest available model checkpoint from various sources.
-
-        This method follows a specific search order to find the most recent checkpoint:
-        1. The S3 bucket of the highest-staked validator.
-        2. The instance's own S3 bucket.
-        3. The local filesystem.
-
-        It ensures that the most authoritative and up-to-date checkpoint is loaded,
-        which is crucial for miners joining the network or recovering from a restart.
-
-        Args:
-            version (str): The templar version string to match against checkpoint files.
-
-        Returns:
-            tuple[Any, int] | None: A tuple containing the loaded checkpoint data and its
-            corresponding window number, or None if no valid checkpoint is found.
-        """
-        try:
-            # 1. Check validator bucket
-            (
-                validator_bucket,
-                validator_uid,
-            ) = await self._get_highest_stake_validator_bucket()
-            if validator_bucket and validator_uid is not None:
-                result = await self._get_bucket_checkpoint(
-                    validator_bucket, validator_uid, version
-                )
-                if result:
-                    # If successfully retrieved, return immediately.
-                    return result
-
-            tplr.logger.info("No checkpoint found in validator R2 storage")
-            return None
-
-        except Exception as e:
-            tplr.logger.error(f"Error getting latest checkpoint: {e}")
-            return None
-
-    async def _get_bucket_checkpoint(
-        self, bucket: Bucket, uid: int, version: str
-    ) -> tuple[Any, int] | None:
-        """
-        Fetches the latest checkpoint from a specified S3 bucket.
-
-        This helper method lists all checkpoint files in the given bucket that match
-        the UID and version, determines the one with the highest window number,
-        and downloads it.
-
-        Args:
-            bucket (Bucket): The S3 bucket to search for checkpoints.
-            uid (int): The UID of the owner of the checkpoint.
-            version (str): The templar version string to match.
-
-        Returns:
-            tuple[Any, int] | None: A tuple containing the loaded checkpoint data and
-            its window number, or None if not found.
-        """
-        try:
-            s3_client = await self._get_s3_client(bucket)
-
-            pat = re.compile(rf"^checkpoint-(\d+)-{uid}-v{re.escape(version)}\.pt$")
-
-            # We'll track the largest checkpoint window and its key
-            latest_checkpoint = None
-            max_window = -1
-
-            # Continuation token for pagination
-            continuation_token = None
-
-            while True:
-                list_kwargs = {
-                    "Bucket": bucket.name,
-                    "Prefix": "checkpoint",
-                }
-                if continuation_token:
-                    list_kwargs["ContinuationToken"] = continuation_token
-
-                response = await s3_client.list_objects_v2(**list_kwargs)
-
-                # If no objects returned, stop checking
-                if not response.get("Contents"):
-                    break
-
-                # Iterate through returned objects to find valid checkpoints
-                for obj in response["Contents"]:
-                    key = obj.get("Key", "")
-                    match = pat.match(key)
-                    if match:
-                        window_number = int(match.group(1))
-                        if window_number > max_window:
-                            max_window = window_number
-                            latest_checkpoint = key
-
-                # Continue pagination if needed
-                if response.get("IsTruncated"):
-                    continuation_token = response.get("NextContinuationToken")
-                else:
-                    # No more pages
-                    break
-
-            # If we found a valid checkpoint, fetch it
-            if latest_checkpoint:
-                # Load checkpoint to CPU to avoid OOM on rank 0
-                loaded_data = await self.s3_get_object(
-                    key=latest_checkpoint, bucket=bucket, map_location="cpu"
-                )
-                if loaded_data:
-                    return loaded_data, max_window
-
-            return None
-
-        except (ConnectionClosedError, ClientError):
-            await self._purge_s3_client(bucket)
-            return None
-        except Exception as e:
-            tplr.logger.error(f"Error in _get_bucket_checkpoint: {e}")
-            return None
-
-    async def load_checkpoint(
-        self,
-        model,
-        current_window: int,
-        init_version: str | None = None,
-        is_master: bool = True,
-    ) -> tuple[bool, int]:
-        """
-        Rank-0 downloads; all ranks fan-out once.
-        Returns (success, checkpoint_sync_window) identically on all ranks.
-        """
-        # --------- rank-0 fetch + minimal metadata ----------
-        ok, sync_win, full_sd, present = False, 0, {}, set()
-        if is_master:
-            try:
-                init_version = init_version or __version__
-            except NameError:
-                pass
-            result = await self.get_latest_checkpoint(init_version)
-            if result:
-                try:
-                    checkpoint_data, _ = result
-                    full_sd = checkpoint_data["model_state_dict"]
-                    present = {k for k in full_sd.keys()}
-
-                    # Prefer sync_window; fall back to current_window if older ckpt
-                    sw = checkpoint_data.get("sync_window")
-                    cw = checkpoint_data.get("current_window")
-                    sync_win = int(
-                        sw if sw is not None else cw if cw is not None else 0
-                    )
-                    ok = True
-
-                    tplr.logger.info(
-                        f"Checkpoint loaded on rank-0: "
-                        f"start={checkpoint_data.get('start_window')}, "
-                        f"current={checkpoint_data.get('current_window')}, "
-                        f"sync={sync_win}, local_current={current_window}"
-                    )
-                except Exception as e:
-                    tplr.logger.error(f"[ckpt] parse/load failed on rank-0: {e}")
-                    ok, sync_win, full_sd, present = False, 0, {}, set()
-            else:
-                tplr.logger.info("No valid checkpoints found on rank-0")
-
-        # --------- broadcast tiny meta-object to all ranks ----------
-        if dist.is_available() and dist.is_initialized():
-            obj = [(bool(ok), int(sync_win), list(present))] if is_master else [None]
-            dist.broadcast_object_list(obj, src=0)
-            ok, sync_win, present_list = obj[0]
-            present = set(present_list or [])
-        if not ok:
-            return False, 0
-
-        # --------- single fan-out of weights/buffers ----------
-        set_model_state_dict(
-            model,
-            full_sd,
-            options=StateDictOptions(
-                full_state_dict=True, broadcast_from_rank0=True, strict=True
-            ),
-        )
-
-        # Barrier for cleanliness
-        if dist.is_available() and dist.is_initialized():
-            # Get the current device for this rank
-            if torch.cuda.is_available():
-                device_id = torch.cuda.current_device()
-                dist.barrier(device_ids=[device_id])
-            else:
-                dist.barrier()
-
-        return True, int(sync_win)
 
     async def post_peer_list(
         self,
@@ -2544,72 +2437,6 @@ class Comms(ChainManager):
 
         tplr.logger.warning("Max retries exceeded while trying to fetch start_window")
         return None
-
-    async def save_checkpoint(
-        self,
-        model,
-        optimizer,
-        scheduler,
-        momentum,
-        global_step,
-        current_window,
-        start_window,
-    ):
-        """
-        Saves a complete training checkpoint to both local and remote storage.
-
-        This method captures the full state of training—including the model,
-        optimizer, scheduler, and momentum buffers—and persists it. Checkpoints
-        are saved locally for quick access and uploaded to S3 for durability and
-        sharing with other neurons.
-
-        Args:
-            model: The PyTorch model.
-            optimizer: The optimizer instance.
-            scheduler: The learning rate scheduler instance.
-            momentum: A dictionary of momentum buffers.
-            global_step (int): The global training step.
-            current_window (int): The current training window.
-            start_window (int): The starting window of the training run.
-
-        Returns:
-            bool: True if the checkpoint was saved successfully.
-        """
-        checkpoint_data = {
-            "model_state_dict": {
-                k: v.cpu().clone() for k, v in model.state_dict().items()
-            },
-            "optimizer_state_dict": {
-                k: v.cpu().clone() if torch.is_tensor(v) else v
-                for k, v in optimizer.state_dict().items()
-            },
-            "scheduler_state_dict": scheduler.state_dict(),
-            "momentum": {k: v.cpu().clone() for k, v in momentum.items()},
-            "start_window": start_window,
-            "current_window": current_window,
-        }
-
-        # save locally
-        await self.put(
-            state_dict=checkpoint_data,
-            uid=str(self.uid),
-            window=current_window,
-            key="checkpoint",
-            global_step=global_step,
-            local=True,
-        )
-
-        # upload to R2
-        await self.put(
-            state_dict=checkpoint_data,
-            uid=str(self.uid),
-            window=current_window,
-            key="checkpoint",
-            global_step=global_step,
-            local=False,
-        )
-
-        return True
 
     def check_compressed_indices(
         self,

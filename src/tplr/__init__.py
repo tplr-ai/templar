@@ -20,7 +20,7 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "2.0.7"
+__version__ = "2.0.8"
 
 # Import package.
 from .chain import *
@@ -37,3 +37,4 @@ from .sharded_dataset import SharedShardedDataset
 from .sharded_sampler import EvalSampler, MinerSampler
 from .dcp_checkpoint import DCPCheckpointer
 from . import muon
+from . import distributed

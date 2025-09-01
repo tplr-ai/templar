@@ -11,7 +11,6 @@ class DummyHparams:
         self.momentum_decay = 0.9
         self.topk_compression = 5
         self.outer_learning_rate = 0.9
-        self.use_dct = False
 
 
 class DummyCompressor:
@@ -31,10 +30,10 @@ class DummyCompressor:
 
 
 class DummyTransformer:
-    def encode(self, tensor, use_dct):
+    def encode(self, tensor):
         return tensor
 
-    def decode(self, tensor, use_dct):
+    def decode(self, tensor):
         return torch.tensor([0.1, 0.1])
 
 
@@ -165,10 +164,10 @@ def test_error_feedback_decay_and_gradient_accumulation():
             return torch.zeros_like(p)
 
     class DummyPassThroughTransformer:
-        def encode(self, tensor, use_dct):  # identity
+        def encode(self, tensor):  # identity
             return tensor
 
-        def decode(self, tensor, use_dct):  # returns tensor as-is
+        def decode(self, tensor):  # returns tensor as-is
             return tensor
 
     # ------------------------------------------------------------------ #
@@ -258,11 +257,11 @@ def test_compressor_and_transformer_calls():
         def __init__(self):
             self.decode_called_with = None
 
-        def encode(self, tensor, use_dct):
+        def encode(self, tensor):
             # Identity for easier reasoning
             return tensor
 
-        def decode(self, tensor, use_dct):
+        def decode(self, tensor):
             self.decode_called_with = tensor.clone()
             return torch.tensor([0.1, 0.1])  # value not important for this test
 
@@ -468,7 +467,7 @@ def test_propagation_of_transformer_failure():
     miner = DummyMiner()
 
     # Override transformer.decode to throw an exception.
-    def failing_decode(tensor, use_dct):
+    def failing_decode(tensor):
         raise RuntimeError("Transformer error")
 
     miner.transformer.decode = failing_decode

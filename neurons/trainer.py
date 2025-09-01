@@ -676,7 +676,6 @@ class Trainer:
             device=str(self.device),
             is_master=self.is_master,
             world_size=self.world_size,
-            use_dct=self.hparams.use_dct,
         )
         return
 

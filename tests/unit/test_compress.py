@@ -1,5 +1,6 @@
 from typing import Literal
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -7,11 +8,12 @@ import torch.nn as nn
 from tplr.compress import (
     ChunkingTransformer,
     TopKCompressor,
-    _dct,
-    _get_smaller_split,
-    _idct,
+    encode_batch_rows,
     pack_12bit_indices,
     unpack_12bit_indices,
+)
+from tplr.compress.topk import (
+    _get_smaller_split,
 )
 
 
@@ -30,19 +32,19 @@ class TestTopKCompressor:
             use_quantization=True, quantization_bins=256, quantization_range=6
         )
 
-    def test_compress_produces_int16_indices(
+    def test_compress_produces_rice_bitmap_indices(
         self, compress_instance: TopKCompressor[Literal[False]]
     ):
-        """Test that compress() produces 12-bit packed indices"""
+        """Test that compress() produces Rice/bitmap encoded indices"""
         # Create test tensor
-        x = torch.randn(10, 10)
+        x = torch.randn(8, 64)  # 512 elements total, last dim=64
         topk = 10
 
         # Compress using actual method
         idx, val, xshape, totalk = compress_instance.compress(x, topk)
 
-        # Verify index format - should be uint8 tensor for 12-bit packed
-        assert idx.dtype == torch.uint8, f"Expected uint8 packed data, got {idx.dtype}"
+        # Verify index format - should be uint8 tensor for Rice/bitmap codec
+        assert idx.dtype == torch.uint8, f"Expected uint8 encoded data, got {idx.dtype}"
         assert val.shape[-1] == topk
         assert xshape == x.shape
         # totalk is the size of the last dimension after rearranging
@@ -53,7 +55,7 @@ class TestTopKCompressor:
         self, compress_instance_quantized: TopKCompressor[Literal[True]]
     ):
         """Test compression with quantization enabled"""
-        x = torch.randn(10, 10)
+        x = torch.randn(8, 64)  # 512 elements total, last dim=64
         topk = 20
 
         # Compress with quantization
@@ -63,27 +65,28 @@ class TestTopKCompressor:
         assert len(result) == 5
         idx, val, _, _, qparams = result
 
-        # idx should be uint8 tensor for 12-bit packed format
+        # idx should be uint8 tensor for Rice/bitmap encoded format
         assert idx.dtype == torch.uint8
         assert val.dtype == torch.uint8  # Quantized values
         assert qparams is not None
         assert len(qparams) == 5  # shift, scale, offset, lookup, orig_dtype
 
-    def test_decompress_with_12bit_tuple_format(
+    def test_decompress_with_rice_bitmap_format(
         self, compress_instance: TopKCompressor[Literal[False]]
     ):
-        """Test that decompress can handle 12-bit packed tuple format"""
+        """Test that decompress can handle Rice/bitmap encoded format"""
         # Setup
-        p = torch.zeros(10, 10)
-        xshape = (10, 10)
-        totalk = 100
+        p = torch.zeros(8, 64)  # 512 elements total, last dim=64
+        xshape = (8, 64)
+        totalk = 64
 
-        # Create proper 12-bit packed format using the actual packing function
-        # Create indices that are within valid range for a 10x10 tensor (even count)
+        # Create proper Rice/bitmap encoded format using the encoder
+        # Create indices that are within valid range for a 8x64 tensor (even count)
         original_indices = torch.tensor([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=torch.int64)
 
-        # Pack using the actual function
-        idx = pack_12bit_indices(original_indices)
+        # Pack using the new encoder format
+        payload, _ = encode_batch_rows(original_indices, C=totalk)
+        idx = torch.tensor(np.frombuffer(payload, dtype=np.uint8), dtype=torch.uint8)
 
         val = torch.tensor(
             [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]], dtype=torch.float32
@@ -94,22 +97,29 @@ class TestTopKCompressor:
         assert result.shape == xshape
         assert result.dtype == p.dtype
 
-    def test_batch_decompress_multiple_12bit_formats(
+    def test_batch_decompress_multiple_rice_bitmap_formats(
         self, compress_instance: TopKCompressor[Literal[False]]
     ):
-        """Test batch_decompress with multiple 12-bit packed indices"""
+        """Test batch_decompress with multiple Rice/bitmap encoded indices"""
         # Setup
-        p = torch.zeros(10, 10)
-        xshape = (10, 10)
-        totalk = 100
+        p = torch.zeros(8, 64)  # 512 elements total, last dim=64
+        xshape = (8, 64)
+        totalk = 64
 
-        # Create multiple 12-bit packed indices
+        # Create multiple Rice/bitmap encoded indices
         idx1_orig = torch.tensor([[0, 1], [2, 3]], dtype=torch.int64)
         idx2_orig = torch.tensor([[4, 5], [6, 7]], dtype=torch.int64)
 
-        # Pack them using the 12-bit format
-        idx1_packed = pack_12bit_indices(idx1_orig)
-        idx2_packed = pack_12bit_indices(idx2_orig)
+        # Pack them using the new encoder format
+        payload1, _ = encode_batch_rows(idx1_orig, C=totalk)
+        idx1_packed = torch.tensor(
+            np.frombuffer(payload1, dtype=np.uint8), dtype=torch.uint8
+        )
+
+        payload2, _ = encode_batch_rows(idx2_orig, C=totalk)
+        idx2_packed = torch.tensor(
+            np.frombuffer(payload2, dtype=np.uint8), dtype=torch.uint8
+        )
 
         idx_list = [idx1_packed, idx2_packed]
 
@@ -128,7 +138,7 @@ class TestTopKCompressor:
         self, compress_instance: TopKCompressor[Literal[False]]
     ):
         """Test full compress-decompress round trip"""
-        x = torch.zeros(10, 10)
+        x = torch.zeros(8, 64)  # 512 elements total, last dim=64
         x[0, 0] = 1.0
         x[1, 1] = 2.0
         x[2, 2] = 3.0
@@ -139,7 +149,9 @@ class TestTopKCompressor:
         idx, val, xshape, totalk = compress_instance.compress(x, topk)
 
         # Verify we got the top-k values
-        assert idx.dtype == torch.uint8, "Expected uint8 for 12-bit packed indices"
+        assert idx.dtype == torch.uint8, (
+            "Expected uint8 for Rice/bitmap encoded indices"
+        )
         assert val.shape[-1] == topk
 
         # Decompress
@@ -157,46 +169,47 @@ class TestTopKCompressor:
         expected_vals = torch.tensor([4.0, 3.0, 2.0, 1.0])
         assert torch.allclose(top_vals, expected_vals, atol=1e-5)
 
-    def test_12bit_index_value_range(
+    def test_rice_bitmap_index_value_range(
         self, compress_instance: TopKCompressor[Literal[False]]
     ):
-        """Test that indices can represent values appropriate for 12-bit range"""
+        """Test that Rice/bitmap codec can handle large index ranges efficiently"""
         # Create a large tensor that would have indices beyond 8-bit range
-        x = torch.randn(100, 100)  # 10,000 elements
+        x = torch.randn(128, 128)  # 16,384 elements
         topk = 100
 
         # Compress
         idx, val, _, totalk = compress_instance.compress(x, topk)
 
-        # Check that indices are 12-bit packed format
-        assert idx.dtype == torch.uint8, "Expected uint8 for 12-bit packed indices"
+        # Check that indices are in the new codec format (uint8 bytes)
+        assert idx.dtype == torch.uint8, "Expected uint8 for Rice/bitmap codec"
 
-        # Since idx is packed, we can't directly check max values
-        # Instead verify the packing worked correctly
-        # Use val.shape since it has the same shape as the original indices
-        unpacked = unpack_12bit_indices(idx, val.shape)
+        # Since idx is a byte stream payload, we can't directly check max values
+        # Instead verify round-trip works correctly
+        p = torch.zeros_like(x)
+        result = compress_instance.decompress(p, idx, val, x.shape, totalk)
 
-        # Verify some indices might be larger than 255 (8-bit max)
-        max_idx = unpacked.max().item()
-        assert max_idx < 10000, f"Index {max_idx} exceeds tensor size"
+        # Check that decompression succeeded
+        assert result.shape == x.shape
 
-        # If tensor is large enough, we should have indices > 255
-        if totalk > 256:
-            assert unpacked.max() > 255, (
-                "Large tensor should have indices beyond 8-bit range"
-            )
+        # For a 2D tensor, totalk is the size of the last dimension
+        assert totalk == 128, (
+            f"Expected totalk=128 for 128x128 tensor (last dim), got {totalk}"
+        )
 
     def test_batch_decompress_with_norm_options(
         self, compress_instance: TopKCompressor[Literal[False]]
     ):
         """Test batch_decompress with normalisation and clip_norm options"""
-        p = torch.zeros(10, 10)
-        xshape = (10, 10)
-        totalk = 100
+        p = torch.zeros(8, 64)  # 512 elements total, last dim=64
+        xshape = (8, 64)
+        totalk = 64
 
-        # Create test data with 12-bit packed format
+        # Create test data with Rice/bitmap encoded format
         idx_orig = torch.tensor([[0, 1, 2, 3]], dtype=torch.int64)  # Even count
-        idx_packed = pack_12bit_indices(idx_orig)
+        payload, _ = encode_batch_rows(idx_orig, C=totalk)
+        idx_packed = torch.tensor(
+            np.frombuffer(payload, dtype=np.uint8), dtype=torch.uint8
+        )
         idx = [idx_packed]
         val = [torch.tensor([[10.0, 20.0, 30.0, 40.0]], dtype=torch.float32)]
 
@@ -243,8 +256,6 @@ class TestChunkingTransformer:
 
         # Check that dictionaries were populated
         assert len(transform.shape_dict) > 0
-        assert len(transform.f_dict) > 0
-        assert len(transform.b_dict) > 0
 
         # Check that shape_dict contains parameter dimensions
         for param in mock_model.parameters():
@@ -261,33 +272,17 @@ class TestChunkingTransformer:
         param = next(mock_model.parameters())
 
         # Test encoding
-        encoded = transform.encode(param, use_dct=False)
+        encoded = transform.encode(param)
         assert encoded.numel() == param.numel()
 
         # Test decoding
-        decoded = transform.decode(encoded, use_dct=False)
+        decoded = transform.decode(encoded)
         assert decoded.shape == param.shape
         assert torch.allclose(decoded, param.reshape(decoded.shape))
-
-        # Test with DCT
-        encoded_dct = transform.encode(param, use_dct=True)
-        decoded_dct = transform.decode(encoded_dct, use_dct=True)
-        assert decoded_dct.shape == param.shape
 
 
 class TestUtilityFunctions:
     """Test utility functions using actual implementations"""
-
-    def test_dct_idct_round_trip(self):
-        """Test DCT and IDCT implementations"""
-        x = torch.randn(4, 8)
-
-        # Apply DCT then IDCT
-        X = _dct(x, norm="ortho")
-        x_reconstructed = _idct(X, norm="ortho")
-
-        # Should reconstruct original
-        assert torch.allclose(x, x_reconstructed, atol=1e-6)
 
     def test_get_smaller_split(self):
         """Test _get_smaller_split function"""

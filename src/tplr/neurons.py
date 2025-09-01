@@ -30,10 +30,10 @@ from torch.distributed.tensor import DTensor as DT
 from torch.distributed.tensor import distribute_tensor
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
-from wandb.sdk.wandb_run import Run
 
 import tplr
-from tplr.compress import unpack_12bit_indices
+from tplr.compress import decode_batch_rows
+from wandb.sdk.wandb_run import Run
 
 if TYPE_CHECKING:
     from neurons.miner import Miner
@@ -87,7 +87,6 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
     # ------------ start ------------
     gradient, xshapes, totalks = {}, {}, {}
     lr = float(miner.hparams.outer_learning_rate)
-    use_dct = getattr(miner.hparams, "use_dct", False)
     topk = getattr(miner.hparams, "topk_compression", 32)
 
     if isinstance(miner.model, torch.nn.parallel.DistributedDataParallel):
@@ -161,7 +160,7 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
             error_feedback.add_(grad_full, alpha=lr)
 
         # --- 4) Encode & compress (owner only) ---
-        encoded = miner.transformer.encode(error_feedback, use_dct=use_dct)
+        encoded = miner.transformer.encode(error_feedback)
 
         idxs, vals, xshape, totalk, quant_params = miner.compressor.compress(
             encoded, topk
@@ -180,7 +179,7 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
             )
 
         # --- 6) Decode & error-feedback update (owner only) ---
-        transmit_grad = miner.transformer.decode(decompressed, use_dct=use_dct)
+        transmit_grad = miner.transformer.decode(decompressed)
         del decompressed
         error_feedback.sub_(transmit_grad)
         # Keep error feedback on GPU for now, batch offload later
@@ -232,7 +231,6 @@ def outer_step(
     device: str,
     is_master: bool,
     world_size: int,
-    use_dct: bool = False,
     wandb_run: Run | None = None,
     global_step: int | None = None,
 ) -> None:
@@ -327,7 +325,7 @@ def outer_step(
                 clip_norm=True,
             )
 
-            full_grad_src = transformer.decode(decompressed, use_dct=use_dct)
+            full_grad_src = transformer.decode(decompressed)
             # Single conversion to target dtype+device to avoid extra temporaries
             full_grad_src = full_grad_src.to(
                 dtype=p.dtype, device=p.device, non_blocking=True
@@ -702,7 +700,6 @@ async def catchup_with_aggregation_server(
             device=instance.config.device,
             is_master=instance.is_master,  # rank-0 handles logging
             world_size=instance.world_size,
-            use_dct=instance.hparams.use_dct,
             wandb_run=instance.wandb if instance.is_master else None,
             global_step=instance.global_step,
         )
@@ -946,30 +943,45 @@ async def check_uid_index_overlap(
         if idxs_all is None:
             continue
 
-        # Get values for unpacking shape
-        vals_key = pname + "vals"
-        vals_all = getattr(gather_result.state_dict, vals_key, None)
-        if vals_all is None:
+        def _as_bytes(x) -> bytes:
+            if isinstance(x, (bytes, bytearray)):
+                return bytes(x)
+            if isinstance(x, torch.Tensor):
+                if x.dtype != torch.uint8:
+                    raise ValueError(
+                        f"Expected torch.uint8 for Rice payload, got {x.dtype}"
+                    )
+                return x.detach().cpu().contiguous().numpy().tobytes()
+            raise TypeError(f"Unsupported idx payload type: {type(x)}")
+
+        decoded_per_peer: list[torch.Tensor] = []
+        for i in range(Ptot):
+            idx_data = idxs_all[i] if isinstance(idxs_all, (list, tuple)) else idxs_all
+            payload = _as_bytes(idx_data)
+
+            rows_i, _C_codec, N_rows = decode_batch_rows(
+                payload
+            )  # rows_i: list[list[int]]
+            if N_rows == 0:
+                # no rows for this param/peer → skip param entirely
+                decoded_per_peer = []
+                break
+
+            # ensure rectangular (constant k)
+            k0 = len(rows_i[0])
+            if not all(len(r) == k0 for r in rows_i):
+                raise ValueError("Rice payload has variable k per row; unsupported.")
+
+            decoded_per_peer.append(torch.tensor(rows_i, dtype=torch.int64))
+
+        if not decoded_per_peer:
             continue
 
-        # Unpack all 12-bit packed indices using values shape
-        unpacked_indices = []
-        for i in range(Ptot):
-            idx_data = idxs_all[i] if isinstance(idxs_all, list) else idxs_all
-            val_data = vals_all[i] if isinstance(vals_all, list) else vals_all
+        idxs_tensor = torch.stack(decoded_per_peer, dim=0)  # [P, C, K]
+        P, C_chunks, k = idxs_tensor.shape
+        idxs_flat = idxs_tensor  # already [P, C, K]
 
-            # 12-bit packed format - use values shape for unpacking
-            unpacked = unpack_12bit_indices(
-                idx_data.to(neuron.config.device), val_data.shape
-            )
-            unpacked_indices.append(unpacked)
-
-        idxs_tensor = torch.stack(unpacked_indices, dim=0)
-        P, *chunk_dims, k = idxs_tensor.shape
-        C = int(torch.prod(torch.tensor(chunk_dims)))  # num chunks
-        idxs_flat = idxs_tensor.reshape(P, C, k)
-
-        param_weight = C * k  # size weight
+        param_weight = C_chunks * k  # size weight
 
         for i in range(P):
             for j in range(i + 1, P):

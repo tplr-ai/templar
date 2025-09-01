@@ -1,14 +1,14 @@
 # The MIT License (MIT)
 # © 2025 tplr.ai
-
+#
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the "Software"), to deal in the Software without restriction, including without limitation
 # the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
 # and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
+#
 # The above copyright notice and this permission notice shall be included in all copies or substantial portions of
 # the Software.
-
+#
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
 # THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
@@ -23,212 +23,63 @@
 import math
 from typing import Generic, Literal, Sequence, TypeAlias, TypeVar, cast, overload
 
+import numpy as np
 import torch
-import torch.fft
 from einops import rearrange
 from torch.distributed.tensor import DTensor as DT
 
 import tplr
 
+from .bits import decode_batch_rows, encode_batch_rows
+
 # ─────────── type aliases ────────────────────────────────────────────────
-# primitive shapes
-ShapeT: TypeAlias = tuple[int, ...]  # original dense tensor shape
-Shape4D = tuple[int, int, int, int]  # y, x, h, w
-TotK: TypeAlias = int  # size of the last dim
-
-# 12‑bit packed representation - just the uint8 buffer, no tuple
-IdxT: TypeAlias = torch.Tensor  # 12-bit packed indices (stored as uint8 tensor)
-
+ShapeT: TypeAlias = tuple[int, ...]
+Shape4D = tuple[int, int, int, int]
+TotK: TypeAlias = int
+IdxT: TypeAlias = torch.Tensor  # stored as uint8 byte-stream (new codec)
 QuantParamsT: TypeAlias = tuple[torch.Tensor, float, int, torch.Tensor, torch.dtype]
-
-# For historical names kept elsewhere in the code
 ValT: TypeAlias = torch.Tensor
+
+_DEFAULT_B_CHOICES: tuple[int, ...] = (64, 128)
 
 # Boolean flag that propagates the chosen quantisation mode
 Q = TypeVar("Q", Literal[True], Literal[False])
 
 
-def pack_12bit_indices(indices: torch.Tensor) -> torch.Tensor:
-    """
-    Pack int64 indices into 12-bit representation.
-    Every 2 indices (24 bits) are packed into 3 uint8 values.
-    Assumes even number of indices (topk is always even).
-
-    Args:
-        indices: Tensor with values < 4096 (12-bit max), must have even number of elements
-
-    Returns:
-        packed_tensor as uint8
-    """
-    # Ensure indices fit in 12 bits
-    max_idx = indices.max().item() if indices.numel() > 0 else 0
-    if max_idx >= 4096:
-        raise ValueError(f"Index {max_idx} exceeds 12-bit limit (4095)")
-
-    # Flatten the tensor
-    indices_flat = indices.flatten()
-    n_indices = indices_flat.numel()
-
-    # Ensure we have even number of indices
-    if n_indices % 2 != 0:
-        raise ValueError(f"Number of indices must be even, got {n_indices}")
-
-    # Convert to int32 for bit manipulation
-    indices_flat = indices_flat.to(torch.int32)
-
-    # Process all as pairs
-    indices_pairs = indices_flat
-    n_pairs = n_indices // 2
-
-    # Calculate packed size
-    packed_size = n_pairs * 3
-    packed = torch.zeros(packed_size, dtype=torch.uint8, device=indices.device)
-
-    # Vectorized packing for pairs
-    if n_pairs > 0:
-        idx_pairs = indices_pairs.reshape(-1, 2)
-        idx1 = idx_pairs[:, 0]
-        idx2 = idx_pairs[:, 1]
-
-        # Pack pairs: idx1 uses byte0 + lower 4 bits of byte1
-        #            idx2 uses upper 4 bits of byte1 + byte2
-        packed[0::3] = (idx1 & 0xFF).to(torch.uint8)  # Lower 8 bits of idx1
-        packed[1::3] = (((idx1 >> 8) & 0x0F) | ((idx2 & 0x0F) << 4)).to(torch.uint8)
-        packed[2::3] = ((idx2 >> 4) & 0xFF).to(torch.uint8)  # Upper 8 bits of idx2
-
-    return packed
-
-
-def unpack_12bit_indices(packed: torch.Tensor, values_shape: ShapeT) -> torch.Tensor:
-    """
-    Unpack 12-bit packed indices back to int64.
-    Assumes even number of indices.
-
-    Args:
-        packed: Packed uint8 tensor
-        values_shape: Shape of the values tensor (same as original indices shape)
-
-    Returns:
-        Unpacked indices as int64 tensor with original shape
-    """
-    n_indices = int(torch.prod(torch.tensor(values_shape)).item())
-
-    if n_indices == 0:
-        return torch.zeros(values_shape, dtype=torch.int64, device=packed.device)
-
-    # Ensure even number of indices
-    if n_indices % 2 != 0:
-        raise ValueError(f"Number of indices must be even, got {n_indices}")
-
-    # Prepare output
-    indices = torch.zeros(n_indices, dtype=torch.int64, device=packed.device)
-
-    # All indices are paired
-    n_pairs = n_indices // 2
-
-    if n_pairs > 0:
-        # Vectorized unpacking
-        byte0 = packed[0::3].to(torch.int64)
-        byte1 = packed[1::3].to(torch.int64)
-        byte2 = packed[2::3].to(torch.int64)
-
-        # Reconstruct indices
-        indices[0::2] = byte0 | ((byte1 & 0x0F) << 8)  # idx1
-        indices[1::2] = ((byte1 >> 4) & 0x0F) | (byte2 << 4)  # idx2
-
-    # Reshape to match values shape
-    indices = indices.reshape(values_shape)
-
-    return indices
-
-
 class ChunkingTransformer:
     """
     A transformer for chunking tensors to enable more efficient gradient processing.
-
-    This class handles the chunking of tensors into smaller blocks, which can be
-    processed more efficiently. It pre-calculates Discrete Cosine Transform (DCT)
-    basis matrices for various tensor sizes to speed up the transformation process.
     """
 
     @torch.no_grad()
-    def __init__(self, model, target_chunk, norm="ortho"):
+    def __init__(self, model, target_chunk):
         """
         Initialise the ChunkingTransformer.
 
         Args:
             model: The model whose parameters will be processed.
             target_chunk (int): The target size for tensor chunks.
-            norm (str): The normalization to be used for DCT ('ortho' or None).
         """
         self.target_chunk = target_chunk
 
         self.shape_dict = dict()
-        self.f_dict = dict()
-        self.b_dict = dict()
 
         # Get all variants of model tensor sizes
-        # Generate all possible valid DCT sizes for model tensors
         for _, p in model.named_parameters():
             if not p.requires_grad:
                 continue
             for s in p.shape:
-                # Get the closest smallest divisor to the targeted DCT size
+                # Get the closest smallest divisor to the target chunk size
                 sc = _get_smaller_split(s, self.target_chunk)
                 self.shape_dict[s] = sc
 
-                # Pregenerate DCT basis matrices
-                if sc not in self.f_dict:
-                    I = torch.eye(sc)  # noqa: E741
-                    self.f_dict[sc] = _dct(I, norm=norm).to(p.dtype).to(p.device)
-                    self.b_dict[sc] = _idct(I, norm=norm).to(p.dtype).to(p.device)
-
     @torch.no_grad()
-    def einsum_2d(self, x, b, d=None) -> torch.Tensor:
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Apply a 2D einsum operation for encoding.
-
-        Args:
-            x (torch.Tensor): The input tensor.
-            b (torch.Tensor): The first basis matrix.
-            d (torch.Tensor, optional): The second basis matrix. Defaults to None.
-
-        Returns:
-            torch.Tensor: The transformed tensor.
-        """
-        if d is None:
-            return torch.einsum("...ij, jb -> ...ib", x, b)
-        else:
-            # Note: b-c axis output is transposed to chunk DCT in 2D
-            return torch.einsum("...ijkl, kb, ld -> ...ijbd", x, b, d)
-
-    @torch.no_grad()
-    def einsum_2d_t(self, x, b, d=None) -> torch.Tensor:
-        """
-        Apply a 2D einsum operation for decoding (transpose).
-
-        Args:
-            x (torch.Tensor): The input tensor.
-            b (torch.Tensor): The first basis matrix.
-            d (torch.Tensor, optional): The second basis matrix. Defaults to None.
-
-        Returns:
-            torch.Tensor: The transformed tensor.
-        """
-        if d is None:
-            return torch.einsum("...ij, jb -> ...ib", x, b)
-        else:
-            # Note: b-c axis output is transposed to chunk DCT in 2D
-            return torch.einsum("...ijbd, bk, dl -> ...ijkl", x, b, d)
-
-    @torch.no_grad()
-    def encode(self, x: torch.Tensor, *, use_dct: bool = False) -> torch.Tensor:
-        """
-        Encode a tensor by chunking and optionally applying DCT.
+        Encode a tensor by chunking.
 
         Args:
             x (torch.Tensor): The input tensor to encode.
-            use_dct (bool): Whether to apply the Discrete Cosine Transform.
 
         Returns:
             torch.Tensor: The encoded tensor.
@@ -236,57 +87,27 @@ class ChunkingTransformer:
         if len(x.shape) > 1:  # 2D weights
             n1 = self.shape_dict[x.shape[0]]
             n2 = self.shape_dict[x.shape[1]]
-            n1w = self.f_dict[n1].to(x.device)
-            n2w = self.f_dict[n2].to(x.device)
-            self.f_dict[n1] = n1w
-            self.f_dict[n2] = n2w
-
             x = rearrange(x, "(y h) (x w) -> y x h w", h=n1, w=n2)
-            if use_dct:
-                x = self.einsum_2d(x, n1w, n2w)
-
         else:  # 1D weights
             n1 = self.shape_dict[x.shape[0]]
-            n1w = self.f_dict[n1].to(x.device)
-            self.f_dict[n1] = n1w
-
             x = rearrange(x, "(x w) -> x w", w=n1)
-            if use_dct:
-                x = self.einsum_2d(x, n1w)
 
         return x
 
     @torch.no_grad()
-    def decode(self, x: torch.Tensor, *, use_dct: bool = False) -> torch.Tensor:
+    def decode(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Decode a tensor by un-chunking and optionally applying inverse DCT.
+        Decode a tensor by un-chunking.
 
         Args:
             x (torch.Tensor): The input tensor to decode.
-            use_dct (bool): Whether to apply the inverse Discrete Cosine Transform.
 
         Returns:
             torch.Tensor: The decoded tensor.
         """
         if len(x.shape) > 2:  # 2D weights
-            if use_dct:
-                n1 = x.shape[2]
-                n2 = x.shape[3]
-                n1w = self.b_dict[n1].to(x.device)
-                n2w = self.b_dict[n2].to(x.device)
-                self.b_dict[n1] = n1w
-                self.b_dict[n2] = n2w
-
-                x = self.einsum_2d_t(x, n1w, n2w)
             x = rearrange(x, "y x h w -> (y h) (x w)")
-
         else:  # 1D weights
-            if use_dct:
-                n1 = x.shape[1]
-                n1w = self.b_dict[n1].to(x.device)
-                self.b_dict[n1] = n1w
-
-                x = self.einsum_2d_t(x, n1w)
             x = rearrange(x, "x w -> (x w)")
 
         return x
@@ -362,12 +183,12 @@ class TopKCompressor(Generic[Q]):
         """
         topk = min(topk, x.shape[-1])
         topk = max(topk, 2)
-        # Ensure topk is even for 12-bit packing efficiency
+        # Keep even by default (matches broader system expectations).
         topk = topk - (topk % 2)
         return int(topk)
 
     # ------------------------------------------------------------------ #
-    # compress – returns a 5-tuple *or* a 4-tuple, depending on the mode
+    # compress – returns a 5‑tuple (quant) or 4‑tuple (no quant)
     # ------------------------------------------------------------------ #
     @overload
     def compress(
@@ -395,32 +216,60 @@ class TopKCompressor(Generic[Q]):
             A tuple containing the compressed data. The format depends on whether
             quantization is used.
         """
+        import time
+        
         if isinstance(x, DT):  # check for dtensors
             x = x.to_local()
         xshape = x.shape
-
+        
+        # Log the shape we're compressing
+        shape_start = time.time()
+        original_shape = xshape
+        
         if len(x.shape) > 2:  # 2D weights
             x = rearrange(x, "y x h w -> y x (h w)")
+        
+        reshape_time = time.time() - shape_start
 
         # Limit topk to max size
         totalk = x.shape[-1]
         topk = self._clamp_topk(x, topk)
 
+        # Top‑K
+        topk_start = time.time()
         idx_int64 = torch.topk(
             x.abs(), k=topk, dim=-1, largest=True, sorted=False
         ).indices
         val = torch.gather(x, dim=-1, index=idx_int64)
+        topk_time = time.time() - topk_start
 
-        # Pack indices into 12-bit representation for efficient storage
-        # This reduces storage by 25% compared to int16
-        idx = pack_12bit_indices(idx_int64)
+        # Flatten to [rows, k] for the codec
+        encode_start = time.time()
+        idx2d = idx_int64.reshape(-1, topk).contiguous()
+        # GPU‑accelerated encode → bytes
+        payload, _meta = encode_batch_rows(
+            idx2d, C=totalk, B_choices=_DEFAULT_B_CHOICES
+        )
 
-        # Apply 8-bit quantization if enabled
+        idx_bytes = torch.tensor(
+            np.frombuffer(payload, dtype=np.uint8).copy(),
+            dtype=torch.uint8,
+            device="cpu",
+        )
+        encode_time = time.time() - encode_start
+        
+        # Debug logging for timing
+        if hasattr(self, '_debug_timing') and self._debug_timing:
+            import tplr
+            tplr.logger.info(
+                f"[TOPK COMPRESS] shape={original_shape}, totalk={totalk}, topk={topk}, "
+                f"reshape={reshape_time:.3f}s, topk_select={topk_time:.3f}s, encode={encode_time:.3f}s"
+            )
+
         if self.use_quantization:
-            val, quant_params = self._quantize_values(val)
-            return idx, val, xshape, totalk, quant_params
-
-        return idx, val, xshape, totalk
+            val, qparams = self._quantize_values(val)
+            return idx_bytes, val, xshape, totalk, qparams
+        return idx_bytes, val, xshape, totalk
 
     @torch.no_grad()
     def decompress(
@@ -454,18 +303,23 @@ class TopKCompressor(Generic[Q]):
         if len(xshape) > 2:  # 2D weights
             x = rearrange(x, "y x h w -> y x (h w)")
 
-        # Unpack 12-bit indices using val shape (if needed)
+        # Decode indices
         if idx.dtype == torch.uint8:
-            # 12-bit packed format - unpack it
-            idx_int64 = unpack_12bit_indices(idx, val.shape)
+            payload_bytes = idx.detach().cpu().numpy().tobytes()
+            rows_list, C, _N = decode_batch_rows(payload_bytes)
+            if C != totalk:
+                raise ValueError(f"Index payload C={C} but expected {totalk}")
+            k = val.shape[-1]
+            if any(len(r) != k for r in rows_list):
+                raise ValueError("Row-wise topk size mismatch in index payload")
+            idx_int64 = torch.tensor(
+                rows_list, dtype=torch.int64, device=p.device
+            ).view(*val.shape)
         elif idx.dtype in (torch.int64, torch.long):
-            # Already unpacked (from batch_decompress)
-            idx_int64 = idx
+            idx_int64 = idx.to(p.device)
         else:
-            raise ValueError(
-                f"Expected uint8 (packed) or int64 (unpacked) indices, got {idx.dtype}"
-            )
-        # Ensure val has the same dtype as x for scatter operation
+            raise ValueError(f"Unsupported index tensor dtype: {idx.dtype}")
+
         if val.dtype != x.dtype:
             val = val.to(dtype=x.dtype)
 
@@ -562,13 +416,22 @@ class TopKCompressor(Generic[Q]):
         idx_list = idx if isinstance(idx, Sequence) else [idx]
 
         for i, i_data in enumerate(idx_list):
-            if i_data.dtype != torch.uint8:
-                raise ValueError(
-                    f"Expected uint8 for 12-bit packed indices, got {i_data.dtype}"
-                )
-            # Unpack 12-bit format using corresponding values shape
             v_data = val_list[i]
-            idx_unpacked = unpack_12bit_indices(i_data.to(p.device), v_data.shape)
+            if i_data.dtype == torch.uint8:
+                rows, C, _N = decode_batch_rows(i_data.detach().cpu().numpy().tobytes())
+                if C != totalk:
+                    raise ValueError(f"Index payload C={C} but expected {totalk}")
+                if any(len(r) != v_data.shape[-1] for r in rows):
+                    raise ValueError(
+                        "Row-wise topk size mismatch in index payload (batch)"
+                    )
+                idx_unpacked = torch.tensor(
+                    rows, dtype=torch.int64, device=p.device
+                ).view(*v_data.shape)
+            elif i_data.dtype in (torch.int64, torch.long):
+                idx_unpacked = i_data.to(p.device)
+            else:
+                raise ValueError(f"Unsupported index dtype in batch: {i_data.dtype}")
             unpacked_indices.append(idx_unpacked)
 
         idx_concat = torch.cat(unpacked_indices, dim=-1)
@@ -579,6 +442,7 @@ class TopKCompressor(Generic[Q]):
             p, idx_concat, val_concat, xshape, totalk, quantize_params=None
         )
 
+    # -------------------- quantisation helpers ---------------------------
     @torch.no_grad()
     def _quantize_values(self, val: torch.Tensor) -> tuple[torch.Tensor, QuantParamsT]:
         """
@@ -596,17 +460,18 @@ class TopKCompressor(Generic[Q]):
 
         std = centered.norm() / math.sqrt(centered.numel() - 1)
         scale = self.range_in_sigmas * std / self.n_bins
-        if scale == 0 or torch.isnan(scale) or torch.isinf(scale):
+        if (
+            isinstance(scale, torch.Tensor)
+            and (scale == 0 or torch.isnan(scale) or torch.isinf(scale))
+        ) or (
+            not isinstance(scale, torch.Tensor)
+            and (scale == 0 or not math.isfinite(float(scale)))
+        ):
             scale = torch.tensor(1.0, dtype=centered.dtype, device=val.device)
-
         centered_fp32 = centered.to(torch.float32)
-        qval = (
-            (centered_fp32 / scale + offset)
-            .round()
-            .clamp(0, self.n_bins - 1)
-            .to(torch.uint8)
+        qval = ((centered_fp32 / scale + offset).round().clamp(0, self.n_bins - 1)).to(
+            torch.uint8
         )
-
         device = qval.device
         sums = torch.zeros(self.n_bins, dtype=torch.float32, device=device)
         counts = torch.zeros(self.n_bins, dtype=torch.float32, device=device)
@@ -617,7 +482,7 @@ class TopKCompressor(Generic[Q]):
         )
 
         lookup = torch.where(counts > 0, sums / counts, torch.zeros_like(sums))
-        qparams: QuantParamsT = (shift, float(scale), offset, lookup, val.dtype)
+        qparams: QuantParamsT = (shift, float(scale), int(offset), lookup, val.dtype)
         return qval, qparams
 
     @torch.no_grad()
@@ -635,10 +500,8 @@ class TopKCompressor(Generic[Q]):
             torch.Tensor: The dequantized values.
         """
         if val.dtype == torch.uint8:
-            shift, _, _, lookup, orig_dtype = qparams
-            lookup = (
-                lookup.to(val.device) if isinstance(lookup, torch.Tensor) else lookup
-            )
+            shift, _scale, _offset, lookup, orig_dtype = qparams
+            lookup = lookup.to(val.device)
             deq = lookup[val.long()] + shift
             val = deq.to(orig_dtype)
         return val
@@ -694,98 +557,6 @@ class TopKCompressor(Generic[Q]):
             )
 
         return vals_f32
-
-
-# Code modified and sourced from https://github.com/zh217/torch-dct
-def _dct_fft_impl(v) -> torch.Tensor:
-    """FFT-based implementation of the DCT."""
-    return torch.view_as_real(torch.fft.fft(v, dim=1))
-
-
-def _idct_irfft_impl(V) -> torch.Tensor:
-    """IRFFT-based implementation of the IDCT."""
-    return torch.fft.irfft(torch.view_as_complex(V), n=V.shape[1], dim=1)
-
-
-def _dct(x, norm=None) -> torch.Tensor:
-    """
-    Discrete Cosine Transform, Type II (a.k.a. the DCT)
-
-    For the meaning of the parameter `norm`, see:
-    https://docs.scipy.org/doc/scipy-0.14.0/reference/generated/scipy.fftpack.dct.html
-
-    :param x: the input signal
-    :param norm: the normalization, None or 'ortho'
-    :return: the DCT-II of the signal over the last dimension
-    """
-    x_shape = x.shape
-    N = x_shape[-1]
-    x = x.contiguous().view(-1, N)
-
-    v = torch.cat([x[:, ::2], x[:, 1::2].flip([1])], dim=1)
-
-    Vc = _dct_fft_impl(v)
-
-    k = -torch.arange(N, dtype=x.dtype, device=x.device)[None, :] * math.pi / (2 * N)
-    W_r = torch.cos(k)
-    W_i = torch.sin(k)
-
-    V = Vc[:, :, 0] * W_r - Vc[:, :, 1] * W_i
-
-    if norm == "ortho":
-        V[:, 0] /= math.sqrt(N) * 2
-        V[:, 1:] /= math.sqrt(N / 2) * 2
-
-    V = 2 * V.view(*x_shape)
-
-    return V
-
-
-def _idct(X, norm=None) -> torch.Tensor:
-    """
-    The inverse to DCT-II, which is a scaled Discrete Cosine Transform, Type III
-
-    Our definition of idct is that idct(dct(x)) == x
-
-    For the meaning of the parameter `norm`, see:
-    https://docs.scipy.org/doc/scipy-0.14.0/reference/generated/scipy.fftpack.dct.html
-
-    :param X: the input signal
-    :param norm: the normalization, None or 'ortho'
-    :return: the inverse DCT-II of the signal over the last dimension
-    """
-
-    x_shape = X.shape
-    N = x_shape[-1]
-
-    X_v = X.contiguous().view(-1, x_shape[-1]) / 2
-
-    if norm == "ortho":
-        X_v[:, 0] *= math.sqrt(N) * 2
-        X_v[:, 1:] *= math.sqrt(N / 2) * 2
-
-    k = (
-        torch.arange(x_shape[-1], dtype=X.dtype, device=X.device)[None, :]
-        * math.pi
-        / (2 * N)
-    )
-    W_r = torch.cos(k)
-    W_i = torch.sin(k)
-
-    V_t_r = X_v
-    V_t_i = torch.cat([X_v[:, :1] * 0, -X_v.flip([1])[:, :-1]], dim=1)
-
-    V_r = V_t_r * W_r - V_t_i * W_i
-    V_i = V_t_r * W_i + V_t_i * W_r
-
-    V = torch.cat([V_r.unsqueeze(2), V_i.unsqueeze(2)], dim=2)
-
-    v = _idct_irfft_impl(V)
-    x = v.new_zeros(v.shape)
-    x[:, ::2] += v[:, : N - (N // 2)]
-    x[:, 1::2] += v.flip([1])[:, : N // 2]
-
-    return x.view(*x_shape)
 
 
 def _get_prime_divisors(n: int) -> list[int]:

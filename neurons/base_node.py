@@ -10,12 +10,12 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import bittensor as bt
-import torch.distributed as dist
 import torch.profiler as tp
 import websockets.exceptions  # ensure import before threads start
 from bittensor.core.subtensor import ScaleObj
 
 import tplr
+from tplr.distributed import dist_helper
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -193,12 +193,8 @@ class BaseNode(abc.ABC):
         # external resources
         if hasattr(self, "executor"):
             self.executor.shutdown(wait=False, cancel_futures=True)
-        if (
-            hasattr(self, "world_size")
-            and self.world_size > 1
-            and dist.is_initialized()
-        ):
-            dist.destroy_process_group()
+        if hasattr(self, "world_size"):
+            dist_helper.destroy_process_group()
 
         await asyncio.sleep(0.2)  # allow log flush
         tplr.logger.info("✔ shutdown complete")

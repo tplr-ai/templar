@@ -24,7 +24,6 @@ from contextlib import nullcontext
 from typing import Iterable
 
 import torch
-import torch.distributed as dist
 import torch.profiler as tp
 from torch import autocast
 from torch.distributed.tensor import DTensor as DT
@@ -35,6 +34,7 @@ from torchtitan.components.loss import cross_entropy_loss
 import tplr
 from neurons.base_node import CPU_COUNT
 from tplr import model_factory
+from tplr.distributed import dist_helper
 from tplr.muon import Muon, SingleDeviceMuonWithAuxAdam
 
 
@@ -115,6 +115,8 @@ class Trainer:
             device=str(self.device),
             world_size=self.world_size,
         )
+        # Get bare model (unwrap DDP if needed)
+        self.bare_model = getattr(self.model, "module", self.model)
         self.expected_compressed_params = self.get_expected_params()
         self.tokenizer = self.hparams.tokenizer
 
@@ -344,7 +346,7 @@ class Trainer:
         total_loss = 0.0
         n_batches = 0
 
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        world_size = dist_helper.world_size
 
         with torch.inference_mode():
             model.eval()
@@ -383,13 +385,9 @@ class Trainer:
                 await asyncio.sleep(0)
 
         # Average loss across all ranks, sum batches for distributed training
-        if world_size > 1 and dist.is_initialized():
-            loss_tensor = torch.tensor([total_loss], dtype=torch.float32, device=device)
-            batch_tensor = torch.tensor([n_batches], dtype=torch.int32, device=device)
-            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(batch_tensor, op=dist.ReduceOp.SUM)
-            total_loss = loss_tensor.item()  # Total loss across ranks
-            n_batches = int(batch_tensor.item())  # Total batches across all ranks
+        if world_size > 1 and dist_helper.is_distributed():
+            total_loss = dist_helper.ddp_reduce(total_loss, device=device)
+            n_batches = int(dist_helper.ddp_reduce(n_batches, device=device))
 
         return total_loss, n_batches
 
@@ -440,7 +438,7 @@ class Trainer:
         local_loss_sum: float = 0.0
 
         offload_start = time.time()
-        params_offloaded, param_specs = self._get_offloaded_param()
+        params_offloaded, param_specs = dist_helper.get_offloaded_params(self.model)
         offload_time = time.time() - offload_start
         tplr.logger.info(f"Parameter offload to CPU took {offload_time:.4f}s")
 
@@ -463,7 +461,7 @@ class Trainer:
 
                 # Decide collectively whether we should continue
                 if self.world_size > 1:
-                    cont = self.should_continue(local_has_batch, self.device)
+                    cont = dist_helper.should_continue(local_has_batch, self.device)
                     if not cont:
                         if self.is_master:
                             tplr.logger.info(
@@ -540,22 +538,35 @@ class Trainer:
                 # ------------------------------------------------------------------ #
                 step_now = final_micro_batch or window_changed
                 if self.world_size > 1:
-                    flag = torch.tensor([int(step_now)], device=self.device)
-                    dist.all_reduce(flag, op=dist.ReduceOp.MAX)  # 1-byte sync
-                    step_now = bool(flag.item())  # identical on all ranks
+                    # Use MAX to ensure if any rank needs to step, all step
+                    from torch.distributed import ReduceOp
+
+                    step_now = bool(
+                        dist_helper.ddp_reduce(
+                            int(step_now), op=ReduceOp.MAX, device=self.device
+                        )
+                    )
 
                 if step_now:
                     with (
                         tp.record_function("Optimizer Step") if prof else nullcontext()
                     ):
                         # ── one collective for scalar stats per inner step ───────────
-                        global_tokens_step = int(self._ddp_reduce(local_tokens_sum))
-                        global_loss_step = self._ddp_reduce(local_loss_sum)
+                        global_tokens_step = int(
+                            dist_helper.ddp_reduce(local_tokens_sum, device=self.device)
+                        )
+                        global_loss_step = dist_helper.ddp_reduce(
+                            local_loss_sum, device=self.device
+                        )
                         global_tokens += global_tokens_step
                         global_loss_sum += global_loss_step
 
                         # mean loss of this accumulation step for logging
-                        log_loss = self._ddp_reduce(loss_item, op=dist.ReduceOp.AVG)
+                        from torch.distributed import ReduceOp
+
+                        log_loss = dist_helper.ddp_reduce(
+                            loss_item, op=ReduceOp.AVG, device=self.device
+                        )
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
                         if not null_round:
@@ -577,7 +588,9 @@ class Trainer:
                         local_tokens_sum = 0
                         local_loss_sum = 0
 
-                        accum_batch_size = int(self._ddp_reduce(accum_batch_size))
+                        accum_batch_size = int(
+                            dist_helper.ddp_reduce(accum_batch_size, device=self.device)
+                        )
                         if self.is_master:
                             tplr.logger.info(
                                 f"Inner Step {inner_step_count}, "
@@ -586,7 +599,7 @@ class Trainer:
                             )
                         if window_entry_loss == 0.0:
                             total_batches_first_step = int(
-                                self._ddp_reduce(batch_count)
+                                dist_helper.ddp_reduce(batch_count, device=self.device)
                             )
                             window_entry_loss = (
                                 global_loss_sum / total_batches_first_step
@@ -603,15 +616,16 @@ class Trainer:
                 need_sync = (
                     window_changed or inner_step_count == self.hparams.inner_steps
                 )
-                local_done = torch.tensor(
-                    [need_sync],
-                    dtype=torch.uint8,
-                    device=self.device,
-                )
-
                 if self.world_size > 1:
-                    dist.all_reduce(local_done, op=dist.ReduceOp.MAX)
-                global_done = bool(local_done.item())
+                    from torch.distributed import ReduceOp
+
+                    global_done = bool(
+                        dist_helper.ddp_reduce(
+                            int(need_sync), op=ReduceOp.MAX, device=self.device
+                        )
+                    )
+                else:
+                    global_done = need_sync
 
                 if global_done:
                     if self.is_master:
@@ -628,35 +642,16 @@ class Trainer:
             # ------------------------------------------------------------------ #
             with tp.record_function("Parameter Offloading") if prof else nullcontext():
                 restore_start = time.time()
-                with torch.no_grad():
-                    for (saved_param, param_meta), p in zip(
-                        zip(params_offloaded, param_specs), self.bare_model.parameters()
-                    ):
-                        if param_meta["is_dtensor"] and isinstance(p, DT):
-                            # Handle TP DTensors
-                            saved_param = saved_param.to(p.device, non_blocking=True)
-
-                            # Create a DTensor from the local shard directly
-                            saved_param_dtensor = DT.from_local(
-                                saved_param,
-                                device_mesh=param_meta["device_mesh"],
-                                placements=param_meta["placements"],
-                                run_check=False,
-                            )
-                            p.grad = saved_param_dtensor - p
-                            p.data.copy_(saved_param_dtensor.data)
-                        else:
-                            saved_param = saved_param.to(p.device, non_blocking=True)
-                            p.grad = saved_param - p.data
-                            p.data.copy_(saved_param)
-
+                dist_helper.restore_offloaded_params(
+                    self.model, params_offloaded, param_specs
+                )
                 restore_time = time.time() - restore_start
                 tplr.logger.info(f"Parameter restore to GPU took {restore_time:.4f}s")
 
         # ---------------------------------------------------------------------- #
         # 7. Return aggregated metrics
         # ---------------------------------------------------------------------- #
-        batch_count = int(self._ddp_reduce(batch_count))
+        batch_count = int(dist_helper.ddp_reduce(batch_count, device=self.device))
         return {
             "total_loss": global_loss_sum,  # cross-rank sum
             "window_entry_loss": window_entry_loss,
@@ -679,29 +674,3 @@ class Trainer:
             use_dct=self.hparams.use_dct,
         )
         return
-
-    def _is_distributed(self) -> bool:
-        """True iff torch.distributed is initialised and world_size > 1."""
-        return dist.is_available() and dist.is_initialized() and self.world_size > 1
-
-    def _ddp_reduce(
-        self,
-        value: int | float | torch.Tensor,
-        op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM,
-    ) -> float:
-        """
-        Reduce ``value`` across all ranks and return a **python float**.
-        Use ``op=dist.ReduceOp.AVG`` for mean; default is SUM.
-        """
-        # single-GPU fast path
-        if not self._is_distributed():
-            return float(value.item() if isinstance(value, torch.Tensor) else value)
-
-        # convert to tensor on the right device
-        if not isinstance(value, torch.Tensor):
-            tensor = torch.tensor(float(value), device=self.device)
-        else:
-            tensor = value.to(self.device)
-
-        dist.all_reduce(tensor, op=op)
-        return float(tensor.item())

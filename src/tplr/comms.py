@@ -1593,7 +1593,6 @@ class Comms(ChainManager):
         timeout: int,
         device: str,
         totalks: dict[str, torch.Tensor],
-        compressor: TopKCompressor,
         expected_compressed_params: set[str] | None = None,
         local: bool = True,
         stale_retention: int = 10,
@@ -1637,6 +1636,9 @@ class Comms(ChainManager):
         if not expected_compressed_params:
             expected_compressed_params = set()
 
+        rank = os.getenv("RANK", 0)
+        world_size = os.getenv("WORLD_SIZE", 1)
+
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
@@ -1660,6 +1662,23 @@ class Comms(ChainManager):
         # Ensure deterministic order across processes/ranks
         uids = sorted(uids)
 
+        # Distribute UIDs among ranks
+        uids_per_rank = len(uids) // world_size
+        start_idx = rank * uids_per_rank
+        end_idx = start_idx + uids_per_rank
+        if rank == world_size - 1:  # Last rank takes all remaining UIDs
+            local_uids = uids[start_idx:]
+        else:
+            local_uids = uids[start_idx:end_idx]
+
+        tplr.logger.debug(f"Rank {rank} processing UIDs: {local_uids}")
+
+        local_aggregated_state_dict = {}
+        local_valid_uids = []
+        local_skipped_uids = []
+        local_global_steps = []
+        local_metrics = {"upload_bytes": 0, "download_bytes": 0}
+
         async with self.gather_semaphore:
             batch_tasks = [
                 self.get_with_retry(
@@ -1672,7 +1691,7 @@ class Comms(ChainManager):
                     time_min=time_min,
                     time_max=time_max,
                 )
-                for uid in uids
+                for uid in local_uids
             ]
 
             try:
@@ -1681,23 +1700,25 @@ class Comms(ChainManager):
                     *batch_tasks, return_exceptions=True
                 )
                 tplr.logger.info(
-                    f"{tplr.P(window, tplr.T() - download_start)} Downloaded peer gradients <--"
+                    f"Rank {rank}: {tplr.P(window, tplr.T() - download_start)} Downloaded peer gradients <--"
                 )
                 process_start = tplr.T()
-                for uid, response in zip(uids, batch_responses):
+                for uid, response in zip(local_uids, batch_responses):
                     received_compressed_params = set()
 
                     if isinstance(response, Exception):
                         tplr.log_with_context(
                             level="debug",
-                            message=f"Error from UID {uid}: {str(response)}",
+                            message=f"Rank {rank}: Error from UID {uid}: {str(response)}",
                             current_window=window,
                         )
-                        skipped_uids.append(uid)
+                        local_skipped_uids.append(uid)
                         continue
                     if response is None:
-                        tplr.logger.info(f"Skipped UID {uid} - gradient not found.")
-                        skipped_uids.append(uid)
+                        tplr.logger.info(
+                            f"Rank {rank}: Skipped UID {uid} - gradient not found."
+                        )
+                        local_skipped_uids.append(uid)
                         continue
 
                     try:
@@ -1708,20 +1729,22 @@ class Comms(ChainManager):
                             response.global_step,
                         )
                         tplr.logger.debug(
-                            f"Received state dict and global step {global_step_resp} from UID {uid}"
+                            f"Rank {rank}: Received state dict and global step {global_step_resp} from UID {uid}"
                         )
                     except (TypeError, ValueError) as e:
                         tplr.log_with_context(
                             level="debug",
-                            message=f"Invalid response from UID {uid}: {e}",
+                            message=f"Rank {rank}: Invalid response from UID {uid}: {e}",
                             current_window=window,
                         )
-                        skipped_uids.append(uid)
+                        local_skipped_uids.append(uid)
                         continue
 
                     if state_dict_resp is None:
-                        tplr.logger.debug(f"Empty state dict from UID {uid}")
-                        skipped_uids.append(uid)
+                        tplr.logger.debug(
+                            f"Rank {rank}: Empty state dict from UID {uid}"
+                        )
+                        local_skipped_uids.append(uid)
                         continue
 
                     # ---------- Begin Compressed Indices and Values Check ----------
@@ -1744,7 +1767,7 @@ class Comms(ChainManager):
                                 )
                             ):
                                 tplr.logger.warning(
-                                    f"Bad quant‑params in {param_name} from UID {uid}; "
+                                    f"Rank {rank}: Bad quant‑params in {param_name} from UID {uid}; "
                                     f"shift={shift}, scale={scale}"
                                 )
                                 valid_response = False
@@ -1753,7 +1776,7 @@ class Comms(ChainManager):
                                 not torch.isfinite(lookup).all()
                             ):
                                 tplr.logger.warning(
-                                    f"Lookup table contains non‑finite values in {param_name} "
+                                    f"Rank {rank}: Lookup table contains non‑finite values in {param_name} "
                                     f"from UID {uid}"
                                 )
                                 valid_response = False
@@ -1764,7 +1787,7 @@ class Comms(ChainManager):
                             totalk_value = totalks.get(base_name)
                             if totalk_value is None:
                                 tplr.logger.warning(
-                                    f"Missing totalk for parameter {base_name} from UID {uid}, skipping UID."
+                                    f"Rank {rank}: Missing totalk for parameter {base_name} from UID {uid}, skipping UID."
                                 )
                                 valid_response = False
                                 break
@@ -1786,7 +1809,7 @@ class Comms(ChainManager):
                                 )
                             except Exception as e:
                                 tplr.logger.warning(
-                                    f"Compressed indices check failed for parameter {param_name} from UID {uid}: {e}"
+                                    f"Rank {rank}: Compressed indices check failed for parameter {param_name} from UID {uid}: {e}"
                                 )
                                 valid_response = False
                                 break
@@ -1797,7 +1820,7 @@ class Comms(ChainManager):
                                 # For quantized values, do a quick check on the raw bytes
                                 if tensor.nelement() == 0:
                                     tplr.logger.warning(
-                                        f"Empty tensor in {param_name} from UID {uid}, skipping"
+                                        f"Rank {rank}: Empty tensor in {param_name} from UID {uid}, skipping"
                                     )
                                     valid_response = False
                                     break
@@ -1809,7 +1832,7 @@ class Comms(ChainManager):
                                     or torch.isinf(tensor_to_check).any()
                                 ):
                                     tplr.logger.warning(
-                                        f"NaN/Inf in {param_name} from UID {uid}, skipping"
+                                        f"Rank {rank}: NaN/Inf in {param_name} from UID {uid}, skipping"
                                     )
                                     valid_response = False
                                     break
@@ -1824,7 +1847,7 @@ class Comms(ChainManager):
                             )
                             if qparams is None and tensor.dtype == torch.uint8:
                                 tplr.logger.warning(
-                                    f"Missing quant_params for quantized {param_name} from UID {uid}"
+                                    f"Rank {rank}: Missing quant_params for quantized {param_name} from UID {uid}"
                                 )
                                 valid_response = False
                                 break
@@ -1834,16 +1857,16 @@ class Comms(ChainManager):
                     )
                     if missing_params:
                         tplr.logger.warning(
-                            f"UID {uid} missing compressed parameters: {missing_params}, skipping UID."
+                            f"Rank {rank}: UID {uid} missing compressed parameters: {missing_params}, skipping UID."
                         )
                         valid_response = False
 
                     # If any check failed, skip this UID entirely
                     if not valid_response:
                         tplr.logger.info(
-                            f"Skipping UID {uid} due to validation failures"
+                            f"Rank {rank}: Skipping UID {uid} due to validation failures"
                         )
-                        skipped_uids.append(uid)
+                        local_skipped_uids.append(uid)
                         continue
                     # ---------- End Compressed Indices and Values Check ----------
 
@@ -1851,11 +1874,10 @@ class Comms(ChainManager):
                     for param_name, tensor in state_dict_resp.items():
                         # 1️⃣  Indices are kept as‑is -----------------------------------------
                         if param_name.endswith("idxs"):
-                            aggregated_state_dict.setdefault(param_name, []).append(
-                                tensor
-                            )
-                            # Handle 12-bit packed format (uint8 tensor)
-                            metrics["download_bytes"] += (
+                            local_aggregated_state_dict.setdefault(
+                                param_name, []
+                            ).append(tensor)
+                            local_metrics["download_bytes"] += (
                                 tensor.element_size() * tensor.nelement()
                             )
 
@@ -1865,40 +1887,84 @@ class Comms(ChainManager):
                             aggregated_state_dict.setdefault(param_name, []).append(
                                 tensor  # Keep original dtype (uint8 if quantized)
                             )
-                            metrics["download_bytes"] += (
+                            local_metrics["download_bytes"] += (
                                 tensor.element_size() * tensor.nelement()
                             )
-
-                        # 3️⃣  Store quantization parameters for later use --------------------
                         elif param_name.endswith("quant_params"):
-                            aggregated_state_dict.setdefault(param_name, []).append(
-                                tensor
-                            )
+                            local_aggregated_state_dict.setdefault(
+                                param_name, []
+                            ).append(tensor)
 
-                    valid_uids.append(uid)
-                    global_steps.append(global_step_resp)
+                    local_valid_uids.append(uid)
+                    local_global_steps.append(global_step_resp)
 
                 tplr.logger.info(
-                    f"{tplr.P(window, tplr.T() - process_start)} Processed peer gradients <--"
+                    f"Rank {rank}: {tplr.P(window, tplr.T() - process_start)} Processed peer gradients <--"
                 )
 
             except Exception as e:
-                tplr.logger.error(f"Error processing uid batch: {str(e)}")
+                tplr.logger.error(f"Rank {rank}: Error processing uid batch: {str(e)}")
+
+        # Gather results from all ranks
+        all_aggregated_state_dicts = [None for _ in range(world_size)]
+        all_valid_uids = [None for _ in range(world_size)]
+        all_skipped_uids = [None for _ in range(world_size)]
+        all_global_steps = [None for _ in range(world_size)]
+        all_metrics = [None for _ in range(world_size)]
+
+        if world_size > 1 and dist.is_initialized():
+            dist.all_gather_object(
+                all_aggregated_state_dicts, local_aggregated_state_dict
+            )
+            dist.all_gather_object(all_valid_uids, local_valid_uids)
+            dist.all_gather_object(all_skipped_uids, local_skipped_uids)
+            dist.all_gather_object(all_global_steps, local_global_steps)
+            dist.all_gather_object(all_metrics, local_metrics)
+        else:
+            all_aggregated_state_dicts[0] = local_aggregated_state_dict
+            all_valid_uids[0] = local_valid_uids
+            all_skipped_uids[0] = local_skipped_uids
+            all_global_steps[0] = local_global_steps
+            all_metrics[0] = local_metrics
+
+        # Consolidate results on all ranks
+        aggregated_state_dict: dict[str, list[Any]] = {}
+        valid_uids: list[int] = []
+        skipped_uids: list[int] = []
+        global_steps: list[int] = []
+        total_upload_bytes: int = 0
+        total_download_bytes: int = 0
+
+        for i in range(world_size):
+            if all_aggregated_state_dicts[i] is not None:
+                for param_name, tensors in all_aggregated_state_dicts[i].items():
+                    aggregated_state_dict.setdefault(param_name, []).extend(tensors)
+            if all_valid_uids[i] is not None:
+                valid_uids.extend(all_valid_uids[i])
+            if all_skipped_uids[i] is not None:
+                skipped_uids.extend(all_skipped_uids[i])
+            if all_global_steps[i] is not None:
+                global_steps.extend(all_global_steps[i])
+            if all_metrics[i] is not None:
+                total_upload_bytes += all_metrics[i]["upload_bytes"]
+                total_download_bytes += all_metrics[i]["download_bytes"]
 
         if not valid_uids:
-            tplr.logger.info("No valid gradients received from any UID")
+            tplr.logger.info(
+                "No valid gradients received from any UID across all ranks"
+            )
             return None
 
         total_time = time.time() - start_time
         tplr.logger.info(
             f"Gather done in {total_time:.2f}s. Success rate: {len(valid_uids)}/{len(uids)}, "
-            f"Upload: {metrics['upload_bytes']} bytes, Download: {metrics['download_bytes']} bytes"
+            f"Upload: {total_upload_bytes} bytes, Download: {total_download_bytes} bytes"
         )
 
         result = SimpleNamespace(
             time=total_time,
-            upload_bytes=metrics["upload_bytes"],
-            download_bytes=metrics["download_bytes"],
+            upload_bytes=total_upload_bytes,
+            download_bytes=total_download_bytes,
             success_rate=len(valid_uids) / len(uids),
             state_dict=SimpleNamespace(**aggregated_state_dict),
             uids=valid_uids,

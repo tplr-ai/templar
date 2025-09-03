@@ -64,6 +64,7 @@ from torch.cuda import device_count as _cuda_device_count
 from torch.utils.data import DataLoader
 from torchtitan.components.loss import cross_entropy_loss
 from tqdm.auto import tqdm
+from websockets.exceptions import ConcurrencyError
 
 import tplr
 from tplr import decos
@@ -399,9 +400,9 @@ class Evaluator:
                     f"last evaluated: {self.last_eval_window})."
                 )
             return (False, checkpoint_window, 0)
-
-        # Calculate global step (assuming start_window is 0 for evaluator)
-        global_step = checkpoint_window
+        else:
+            # Calculate global step (assuming start_window is 0 for evaluator)
+            global_step = checkpoint_window
 
         if self.is_master:
             tplr.logger.info(
@@ -436,7 +437,11 @@ class Evaluator:
         Returns:
             Tuple containing (exit_code, runtime)
         """
-        default_model_args = [f"pretrained={MODEL_PATH}", f"tokenizer={MODEL_PATH}"]
+        default_model_args = [
+            f"pretrained={MODEL_PATH}",
+            f"tokenizer={MODEL_PATH}",
+            "max_length=2048",
+        ]
 
         extra = None
         device_arg = self.device
@@ -463,9 +468,9 @@ class Evaluator:
             f"--model_args {model_args}",
             f"--tasks {tasks}",
             f"--device {device_arg}",
-            f"--batch_size {batch_size}",
+            f"--batch_size auto",  # {batch_size}",
             f"--output_path {output_dir}",
-            f"--limit 0.2",
+            f"--limit 0.1",
         ]
 
         if limit:
@@ -605,9 +610,22 @@ class Evaluator:
         self.comms.update_peers_with_buckets()
         start_window = await self.comms.get_start_window()
 
-        block_number = self.comms.subtensor.get_current_block() - 1
+        if self.is_master:
+            block_number_list = []
+            while not block_number_list:
+                try:
+                    # Master node determines the block number
+                    block_number_list = [self.comms.subtensor.get_current_block() - 1]
+                except ConcurrencyError:
+                    pass
+        else:
+            # Other nodes have a placeholder
+            block_number_list = [0]
 
-        tplr.logger.info(f"Looking for new checkpoint (block: {block_number})")
+        # Broadcast the block number from master to all other nodes
+        dist.broadcast_object_list(block_number_list, src=0)
+        block_number = block_number_list[0]
+        plr.logger.info(f"Looking for new checkpoint (block: {block_number})")
 
         (
             success,
@@ -630,9 +648,8 @@ class Evaluator:
             global_step = 0
         else:
             self.evaluated_checkpoints.append(checkpoint_window)
-
-        # Calculate global step (assuming start_window is 0 for evaluator)
-        global_step = checkpoint_window - start_window
+            # Calculate global step (assuming start_window is 0 for evaluator)
+            global_step = checkpoint_window - start_window
 
         if self.is_master:
             tplr.logger.info(

@@ -81,9 +81,6 @@ class Trainer:
             dataset=self.dataset,
             sampler=self.sampler,
             batch_size=self.hparams.micro_batch_size,
-            num_workers=10,
-            pin_memory=True,
-            prefetch_factor=2,
         )
         tplr.logger.info("[Run] dataset + sampler ready")
         return

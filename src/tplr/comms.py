@@ -2159,6 +2159,197 @@ class Comms(ChainManager):
         tplr.logger.info(f"Validator Bucket: {validator_bucket}")
         return validator_bucket, validator_uid
 
+    async def get_latest_checkpoint(self, version: str) -> tuple[Any, int] | None:
+        """
+        Retrieves the latest available model checkpoint from various sources.
+
+        This method follows a specific search order to find the most recent checkpoint:
+        1. The S3 bucket of the highest-staked validator.
+        2. The instance's own S3 bucket.
+        3. The local filesystem.
+
+        It ensures that the most authoritative and up-to-date checkpoint is loaded,
+        which is crucial for miners joining the network or recovering from a restart.
+
+        Args:
+            version (str): The templar version string to match against checkpoint files.
+
+        Returns:
+            tuple[Any, int] | None: A tuple containing the loaded checkpoint data and its
+            corresponding window number, or None if no valid checkpoint is found.
+        """
+        try:
+            # 1. Check validator bucket
+            (
+                validator_bucket,
+                validator_uid,
+            ) = await self._get_highest_stake_validator_bucket()
+            if validator_bucket and validator_uid is not None:
+                result = await self._get_bucket_checkpoint(
+                    validator_bucket, validator_uid, version
+                )
+                if result:
+                    # If successfully retrieved, return immediately.
+                    return result
+
+            tplr.logger.info("No checkpoint found in validator R2 storage")
+            return None
+
+        except Exception as e:
+            tplr.logger.error(f"Error getting latest checkpoint: {e}")
+            return None
+
+    async def _get_bucket_checkpoint(
+        self, bucket: Bucket, uid: int, version: str
+    ) -> tuple[Any, int] | None:
+        """
+        Fetches the latest checkpoint from a specified S3 bucket.
+
+        This helper method lists all checkpoint files in the given bucket that match
+        the UID and version, determines the one with the highest window number,
+        and downloads it.
+
+        Args:
+            bucket (Bucket): The S3 bucket to search for checkpoints.
+            uid (int): The UID of the owner of the checkpoint.
+            version (str): The templar version string to match.
+
+        Returns:
+            tuple[Any, int] | None: A tuple containing the loaded checkpoint data and
+            its window number, or None if not found.
+        """
+        try:
+            s3_client = await self._get_s3_client(bucket)
+
+            pat = re.compile(rf"^checkpoint-(\d+)-{uid}-v{re.escape(version)}\.pt$")
+
+            # We'll track the largest checkpoint window and its key
+            latest_checkpoint = None
+            max_window = -1
+
+            # Continuation token for pagination
+            continuation_token = None
+
+            while True:
+                list_kwargs = {
+                    "Bucket": bucket.name,
+                    "Prefix": "checkpoint",
+                }
+                if continuation_token:
+                    list_kwargs["ContinuationToken"] = continuation_token
+
+                response = await s3_client.list_objects_v2(**list_kwargs)
+
+                # If no objects returned, stop checking
+                if not response.get("Contents"):
+                    break
+
+                # Iterate through returned objects to find valid checkpoints
+                for obj in response["Contents"]:
+                    key = obj.get("Key", "")
+                    match = pat.match(key)
+                    if match:
+                        window_number = int(match.group(1))
+                        if window_number > max_window:
+                            max_window = window_number
+                            latest_checkpoint = key
+
+                # Continue pagination if needed
+                if response.get("IsTruncated"):
+                    continuation_token = response.get("NextContinuationToken")
+                else:
+                    # No more pages
+                    break
+
+            # If we found a valid checkpoint, fetch it
+            if latest_checkpoint:
+                # Load checkpoint to CPU to avoid OOM on rank 0
+                loaded_data = await self.s3_get_object(
+                    key=latest_checkpoint, bucket=bucket, map_location="cpu"
+                )
+                if loaded_data:
+                    return loaded_data, max_window
+
+            return None
+
+        except (ConnectionClosedError, ClientError):
+            await self._purge_s3_client(bucket)
+            return None
+        except Exception as e:
+            tplr.logger.error(f"Error in _get_bucket_checkpoint: {e}")
+            return None
+
+    async def load_checkpoint(
+        self,
+        model,
+        current_window: int,
+        init_version: str | None = None,
+        is_master: bool = True,
+    ) -> tuple[bool, int]:
+        """
+        Rank-0 downloads; all ranks fan-out once.
+        Returns (success, checkpoint_sync_window) identically on all ranks.
+        """
+        # --------- rank-0 fetch + minimal metadata ----------
+        ok, sync_win, full_sd, present = False, 0, {}, set()
+        if is_master:
+            version_to_check = init_version or tplr.__version__
+            result = await self.get_latest_checkpoint(version_to_check)
+            if result:
+                try:
+                    checkpoint_data, _ = result
+                    full_sd = checkpoint_data["model_state_dict"]
+                    present = {k for k in full_sd.keys()}
+
+                    # Prefer sync_window; fall back to current_window if older ckpt
+                    sw = checkpoint_data.get("sync_window")
+                    cw = checkpoint_data.get("current_window")
+                    sync_win = int(
+                        sw if sw is not None else cw if cw is not None else 0
+                    )
+                    ok = True
+
+                    tplr.logger.info(
+                        f"Checkpoint loaded on rank-0: "
+                        f"start={checkpoint_data.get('start_window')}, "
+                        f"current={checkpoint_data.get('current_window')}, "
+                        f"sync={sync_win}, local_current={current_window}"
+                    )
+                except Exception as e:
+                    tplr.logger.error(f"[ckpt] parse/load failed on rank-0: {e}")
+                    ok, sync_win, full_sd, present = False, 0, {}, set()
+            else:
+                tplr.logger.info("No valid checkpoints found on rank-0")
+
+        # --------- broadcast tiny meta-object to all ranks ----------
+        if dist.is_available() and dist.is_initialized():
+            obj = [(bool(ok), int(sync_win), list(present))] if is_master else [None]
+            dist.broadcast_object_list(obj, src=0)
+            ok, sync_win, present_list = obj[0]
+            present = set(present_list or [])
+        if not ok:
+            return False, 0
+
+        # --------- single fan-out of weights/buffers ----------
+        set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(
+                full_state_dict=True, broadcast_from_rank0=True, strict=True
+            ),
+        )
+
+        # Barrier for cleanliness
+        if dist.is_available() and dist.is_initialized():
+            # Get the current device for this rank
+            if torch.cuda.is_available():
+                device_id = torch.cuda.current_device()
+                dist.barrier(device_ids=[device_id])
+            else:
+                dist.barrier()
+
+        return True, int(sync_win)
+
     async def post_peer_list(
         self,
         *,
@@ -2372,7 +2563,11 @@ class Comms(ChainManager):
                 tplr.logger.error(f"Error fetching peer list: {e}")
                 await asyncio.sleep(10)
 
-    async def get_start_window(self, retries: int = -1) -> int | None:
+    async def get_start_window(
+        self,
+        version: str = tplr.__version__,
+        retries: int = -1,
+    ) -> int | None:
         """
         Retrieves the official start window from the highest-staked validator.
 
@@ -2382,6 +2577,7 @@ class Comms(ChainManager):
         starting point for training.
 
         Args:
+            version (str, optional): The templar version string. Defaults to `tplr.__version__`.
             retries (int, optional): The number of times to retry fetching the start
                 window. A value of -1 means infinite retries. Defaults to -1.
 
@@ -2403,12 +2599,17 @@ class Comms(ChainManager):
                     await asyncio.sleep(10)
                     continue
 
-                tplr.logger.info(
-                    f"Attempting to fetch start_window from UID {validator_uid} bucket {validator_bucket.name}"
-                )
+                if version == tplr.__version__:
+                    tplr.logger.info(
+                        f"Attempting to fetch start_window from UID {validator_uid} bucket {validator_bucket.name} with default version: {version}."
+                    )
+                else:
+                    tplr.logger.info(
+                        f"Attempting to fetch start_window from UID {validator_uid} bucket {validator_bucket.name} with specified version: {version}."
+                    )
 
                 start_window_data = await self.s3_get_object(
-                    key=f"start_window_v{tplr.__version__}.json",
+                    key=f"start_window_v{version}.json",
                     bucket=validator_bucket,
                 )
 

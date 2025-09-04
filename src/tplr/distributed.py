@@ -95,7 +95,7 @@ class DistributedHelper:
     def ddp_reduce(
         self,
         value: int | float | torch.Tensor,
-        op: dist.ReduceOp = dist.ReduceOp.SUM,
+        op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM,
         device: torch.device | None = None,
     ) -> float:
         """

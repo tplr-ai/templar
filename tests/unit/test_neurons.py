@@ -300,11 +300,44 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
     ):
         # Arrange
         self.instance.current_window = 3
+        # Create proper response objects that match what outer_step expects
+        # The state_dict should contain param + "idxs" and param + "vals" keys
         mock_get = AsyncMock()
-        mock_get.return_value = MagicMock(
-            success=True,
-            data={"state_dict": {"param1": torch.rand(10)}, "uids": [0, 1]},
-        )
+        # Set up multiple return values for the different get calls
+        mock_get.side_effect = [
+            # Window 1 aggregator fetch
+            SimpleNamespace(
+                success=True,
+                data={
+                    "state_dict": {
+                        "param1idxs": torch.tensor([0, 1]),
+                        "param1vals": torch.tensor([0.1, 0.2]),
+                    },
+                    "uids": [0, 1],
+                },
+            ),
+            # Window 1 debug dict fetch
+            SimpleNamespace(
+                success=True,
+                data={"state_dict": {"param1_debug": torch.rand(10)}, "uids": [0, 1]},
+            ),
+            # Window 2 aggregator fetch
+            SimpleNamespace(
+                success=True,
+                data={
+                    "state_dict": {
+                        "param1idxs": torch.tensor([2, 3]),
+                        "param1vals": torch.tensor([0.3, 0.4]),
+                    },
+                    "uids": [0, 1],
+                },
+            ),
+            # Window 2 debug dict fetch
+            SimpleNamespace(
+                success=True,
+                data={"state_dict": {"param1_debug": torch.rand(10)}, "uids": [0, 1]},
+            ),
+        ]
         self.instance.comms.get = mock_get
         mock_compare.return_value = {
             "success": True,
@@ -338,13 +371,13 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
     ):
         # Arrange
         self.instance.current_window = 2
-        mock_get = AsyncMock(return_value=MagicMock(success=False, data=None))
+        mock_get = AsyncMock(return_value=SimpleNamespace(success=False, data=None))
         self.instance.comms.get = mock_get
-        self.instance.comms.gather = AsyncMock(
-            return_value=SimpleNamespace(
-                state_dict=SimpleNamespace(param1=torch.rand(10))
-            )
-        )
+        # Create a proper SimpleNamespace for state_dict that won't interfere with mocking
+        state_dict_ns = SimpleNamespace()
+        state_dict_ns.param1 = torch.rand(10)
+        gather_result = SimpleNamespace(state_dict=state_dict_ns)
+        self.instance.comms.gather = AsyncMock(return_value=gather_result)
 
         # Act
         asyncio.run(catchup_with_aggregation_server(self.instance, 0))
@@ -373,7 +406,7 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
     ):
         # Arrange
         self.instance.current_window = 2
-        mock_get = AsyncMock(return_value=MagicMock(success=False, data=None))
+        mock_get = AsyncMock(return_value=SimpleNamespace(success=False, data=None))
         self.instance.comms.get = mock_get
         self.instance.comms.gather = AsyncMock(return_value=None)  # Gather fails
 
@@ -406,20 +439,20 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         self.instance.current_window = 4
         mock_get = AsyncMock()
         mock_get.side_effect = [
-            MagicMock(success=False, data=None),  # Fail for window 1
-            MagicMock(
+            SimpleNamespace(success=False, data=None),  # Fail for window 1
+            SimpleNamespace(
                 success=True,
                 data={"state_dict": {"param1": torch.rand(10)}, "uids": [0, 1]},
             ),  # Success for window 2
-            MagicMock(
+            SimpleNamespace(
                 success=True,
                 data={"state_dict": {"param1": torch.rand(10)}, "uids": [0, 1]},
             ),  # Success for window 3
-            MagicMock(
+            SimpleNamespace(
                 success=True,
                 data={"state_dict": {"param1": torch.rand(10)}, "uids": [0, 1]},
             ),  # debug dict for w2
-            MagicMock(
+            SimpleNamespace(
                 success=True,
                 data={"state_dict": {"param1": torch.rand(10)}, "uids": [0, 1]},
             ),  # debug dict for w3
@@ -462,7 +495,7 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
             # Simulate chain progressing
             if kwargs.get("key") == "aggregator" and self.instance.current_window < 5:
                 self.instance.current_window += 1
-            return MagicMock(
+            return SimpleNamespace(
                 success=True,
                 data={"state_dict": {"param1": torch.rand(10)}, "uids": [0, 1]},
             )
@@ -503,12 +536,12 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         self.instance.current_window = 3
         mock_get = AsyncMock()
         mock_get.side_effect = [
-            MagicMock(success=True, data={}),  # Malformed payload for window 1
-            MagicMock(
+            SimpleNamespace(success=True, data={}),  # Malformed payload for window 1
+            SimpleNamespace(
                 success=True,
                 data={"state_dict": {"param1": torch.rand(10)}, "uids": [0, 1]},
             ),  # Success for window 2
-            MagicMock(
+            SimpleNamespace(
                 success=True,
                 data={"state_dict": {"param1": torch.rand(10)}, "uids": [0, 1]},
             ),  # debug dict for w2

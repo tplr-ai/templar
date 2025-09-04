@@ -17,6 +17,7 @@
 
 
 import asyncio
+import gc
 import math
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -502,7 +503,7 @@ async def catchup_with_aggregation_server(
     instance: NeuronT, checkpoint_current_window: int
 ) -> None:
     """
-    Synchronise the local model with the chain.
+    Synchronise the local model with the chain with memory optimizations.
 
     For every window between the checkpoint and the current chain head:
 
@@ -515,21 +516,36 @@ async def catchup_with_aggregation_server(
        `instance.comms.gather( ..., key="gradient", ... )` against the current
        peer-set and apply those gradients instead.
 
-    After each application we advance the inner LR scheduler, clear CUDA
-    cache, and (optionally) log a debug-dict comparison so we can estimate how
-    many optimisation steps we were behind the leader.
+    After each application we advance the inner LR scheduler, aggressively clear
+    memory including CUDA cache and CPU memory via garbage collection.
 
     The loop exits when `start_w` has caught up with `instance.current_window`
     (taking into account that the chain head may advance while we are replaying).
     """
-    tplr.logger.info("Starting catch‑up using aggregated_gradients...")
+    tplr.logger.info(
+        "Starting catch‑up using aggregated_gradients with memory optimization..."
+    )
     assert instance.start_window is not None
+
+    def log_memory_usage(prefix: str):
+        """Log current memory usage statistics."""
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            max_memory = torch.cuda.max_memory_allocated() / 1024**3
+            tplr.logger.info(
+                f"{prefix} - GPU Memory: Allocated={allocated:.2f}GB, "
+                f"Reserved={reserved:.2f}GB, Max={max_memory:.2f}GB"
+            )
 
     leader_uid: int = instance.comms.metagraph.S.argmax().item()
 
     start_w = checkpoint_current_window + 1
     target_w = instance.current_window
     tplr.logger.info(f"Replaying windows {start_w} ... {target_w - 1}")
+
+    # Log initial memory state
+    log_memory_usage("Initial memory state")
 
     # Verify checkpoint loaded correctly before applying any gradients
     if checkpoint_current_window > 0 and instance.is_master:
@@ -584,6 +600,11 @@ async def catchup_with_aggregation_server(
         # 1) Fetch the aggregated object dumped by the leader validator.
         # ------------------------------------------------------------------
         if instance.is_master:
+            # Clear memory before fetching to maximize available space
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             fetch = await instance.comms.get(
                 uid=str(leader_uid),
                 window=start_w,
@@ -606,6 +627,12 @@ async def catchup_with_aggregation_server(
                     skipped_uids=payload.get("skipped_uids", []),
                     success_rate=payload.get("success_rate", 0.0),
                 )
+
+                # Clear the original payload dict to free memory immediately
+                del payload
+                if hasattr(fetch, "data"):
+                    fetch.data = None
+                del fetch
 
             # ── B. aggregated object *missing* or *malformed* ────────────────
             else:
@@ -713,8 +740,26 @@ async def catchup_with_aggregation_server(
             for _ in range(instance.hparams.inner_steps):
                 inner_sched.step()
 
+        # Aggressive memory cleanup after each window
+        if instance.is_master and "gather_ns" in locals() and gather_ns is not None:
+            # Clear the gather result to free memory
+            if hasattr(gather_ns, "state_dict"):
+                # Clear all attributes from state_dict namespace
+                for key in list(vars(gather_ns.state_dict).keys()):
+                    delattr(gather_ns.state_dict, key)
+            del gather_ns
+
+        # Force garbage collection to free CPU memory
+        gc.collect()
+
+        # Clear CUDA cache and synchronize
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        # Log memory usage after cleanup
+        if instance.is_master and (start_w - checkpoint_current_window) % 5 == 0:
+            log_memory_usage(f"After window {start_w} cleanup")
         # ──────────────────────────────────────────────────────────────────────
         # 3) Debug‑dict comparison to estimate “how many steps behind” we are
         # ──────────────────────────────────────────────────────────────────────
@@ -797,6 +842,16 @@ async def catchup_with_aggregation_server(
             target_w = instance.current_window
 
     instance.global_step = target_w - instance.start_window
+
+    # Final aggressive memory cleanup
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+
+    # Log final memory state
+    log_memory_usage("Final memory state after catchup")
     tplr.logger.info("Catch‑up finished – model now in sync.")
 
 

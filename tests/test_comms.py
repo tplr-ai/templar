@@ -9,9 +9,7 @@ from botocore.exceptions import ClientError
 import pytest
 import torch
 from types import SimpleNamespace
-from dotenv import load_dotenv
 import asyncio
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from tplr import load_hparams

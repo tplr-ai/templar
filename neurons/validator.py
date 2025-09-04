@@ -2169,6 +2169,7 @@ class Validator(BaseNode, Trainer):
                     model=self.model,
                     window=self.sync_window,
                     sync_window=self.sync_window,
+                    global_step=self.global_step,
                     topology="FSDP",
                 )
 
@@ -3171,14 +3172,20 @@ class Validator(BaseNode, Trainer):
         # Proceed to load checkpoint
         #   • rank-0 (or single-GPU run) downloads & catches-up
         #   • remaining ranks receive state via NCCL broadcast
-        ckpt_sync_win = await self.ckpt.download_and_load(
+        res = await self.ckpt.download_and_load(
             model=self.model,
             window=None,  # latest
             shared_fs=True,
             process_group=None,
             prefer_highest_staked=True,
         )
-        ckpt_ok = ckpt_sync_win is not None
+        if res is not None:
+            ckpt_ok = True
+            ckpt_sync_win, ckpt_global_step = res
+        else:
+            ckpt_ok = False
+            ckpt_sync_win, ckpt_global_step = 0, self.global_step
+        self.global_step = ckpt_global_step
 
         assert self.start_window is not None
         if ckpt_ok:

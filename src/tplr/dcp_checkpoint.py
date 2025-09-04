@@ -225,6 +225,7 @@ class DCPCheckpointer:
         model,
         window: int,
         sync_window: int,
+        global_step: int,
         topology: str = "FSDP",
     ) -> "DCPCheckpointer.SaveHandle":
         """
@@ -246,6 +247,7 @@ class DCPCheckpointer:
                 "version": self.version,
                 "window": int(window),
                 "sync_window": int(sync_window),
+                "global_step": int(global_step),
                 "world_size_at_save": int(_world()),
                 "topology": topology,
                 "uid": self.uid,
@@ -662,7 +664,7 @@ class DCPCheckpointer:
         shared_fs: bool = True,
         process_group: dist.ProcessGroup | None = None,
         prefer_highest_staked: bool = True,
-    ) -> int | None:
+    ) -> tuple[int, int] | None:
         local_dir = await (
             self.download_distributed(
                 window=window, prefer_highest_staked=prefer_highest_staked
@@ -676,5 +678,6 @@ class DCPCheckpointer:
             return None
         sidecar = json.loads((local_dir / "extra_metadata.json").read_text())
         w = int(sidecar["window"])
+        global_step = int(sidecar["global_step"])
         self.load_local(model=model, window=w, process_group=process_group)
-        return w
+        return w, global_step

@@ -367,7 +367,9 @@ async def test_download_and_load_uses_sidecar(
     layout = Layout("z", 123)
     local_dir = tmp_path / layout.prefix
     local_dir.mkdir(parents=True, exist_ok=True)
-    (local_dir / "extra_metadata.json").write_text(json.dumps({"window": 123}))
+    (local_dir / "extra_metadata.json").write_text(
+        json.dumps({"window": 123, "global_step": 456})
+    )
 
     # Stub out the download method to return our local_dir
     async def fake_download(**_kwargs):
@@ -386,5 +388,5 @@ async def test_download_and_load_uses_sidecar(
     got = await ckpt.download_and_load(
         model=object(), window=None, shared_fs=True, process_group=None
     )
-    assert got == 123
+    assert got == (123, 456)  # Now returns (window, global_step)
     assert called["window"] == 123

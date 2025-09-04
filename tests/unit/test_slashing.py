@@ -31,6 +31,7 @@ def validator_instance(monkeypatch):
     validator.naughty_peer_timeout = 200
     validator.sync_window = 0
     validator.current_window = 0
+    validator.peer_eval_history = {}
 
     # Mock comms and metagraph
     validator.comms = SimpleNamespace()

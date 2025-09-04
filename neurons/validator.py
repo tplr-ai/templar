@@ -24,13 +24,13 @@ import os
 import random
 import sys
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
 from types import SimpleNamespace
-from typing import cast
+from typing import Deque, cast
 
 import bittensor as bt
 import numpy as np
@@ -307,7 +307,6 @@ class Validator(BaseNode, Trainer):
         self.previous_avg_loss_after_own = 0.0
         self.previous_avg_loss_before_random = 0.0
         self.previous_avg_loss_after_random = 0.0
-        self.valid_score_indices = []
 
         # Caching
         self.state_path = f"validator-state-{tplr.__version__}.pt"
@@ -387,6 +386,10 @@ class Validator(BaseNode, Trainer):
 
         self.burn_uid = 1
 
+        # Track negative evaluation history for each peer (last 20 evaluations)
+        self.peer_eval_history: dict[int, Deque[bool]] = {}
+        self.eval_history_limit = 20  # Track last 20 evaluations per peer
+
     def reset_peer(self, uid: int) -> None:
         """
         Generally based on peer behavior, reset their scores
@@ -403,7 +406,51 @@ class Validator(BaseNode, Trainer):
         self.openskill_ratings.pop(uid, None)
         self.eval_peers.pop(uid, None)
         self.inactive_scores.pop(uid, None)
+        self.peer_eval_history.pop(uid, None)
         return
+
+    def track_negative_evaluation(self, eval_uid: int) -> None:
+        """
+        Track negative evaluation history for a peer over the last N evaluations.
+        Stores True for negative, False for positive. Frequency = mean(history).
+        """
+        # --- get score safely
+        is_negative = bool(self.gradient_scores[eval_uid] < 0)
+
+        # --- init on first use
+        if eval_uid not in self.peer_eval_history:
+            self.peer_eval_history[eval_uid] = deque(maxlen=self.eval_history_limit)
+
+        window = self.peer_eval_history[eval_uid]
+
+        # --- update window
+        window.append(is_negative)
+
+        # --- compute stats
+        total = len(window)
+        neg_count = sum(window)  # True==1, False==0
+        negative_freq = (neg_count / total) if total else 0.0
+
+        # --- logging (consider rate limiting in practice)
+        tplr.log_with_context(
+            level="info",
+            message=(
+                f"UID {eval_uid} negative eval frequency: "
+                f"{neg_count}/{total} ({negative_freq:.1%}) in last {total} evals"
+            ),
+            sync_window=self.sync_window,
+            current_window=self.current_window,
+            eval_uid=eval_uid,
+        )
+
+        self.wandb.log(
+            {
+                f"validator/negative_eval/count/{eval_uid}": neg_count,
+                f"validator/negative_eval/frequency/{eval_uid}": negative_freq,
+                f"validator/negative_eval/total_evals/{eval_uid}": total,
+            },
+            step=self.global_step,
+        )
 
     def log_sync_score(
         self, eval_uid: int, sync_result: dict[str, bool | float | int | str]
@@ -1627,6 +1674,9 @@ class Validator(BaseNode, Trainer):
                         eval_uid=eval_uid,
                     )
 
+                    # Track negative evaluation history
+                    self.track_negative_evaluation(eval_uid)
+
                 # Initialize or update OpenSkill rating for this peer
                 if eval_uid not in self.openskill_ratings and self.is_master:
                     self.openskill_ratings[eval_uid] = self.openskill_model.rating(
@@ -2017,7 +2067,7 @@ class Validator(BaseNode, Trainer):
                     "validator/network/evaluated_uids": len(self.evaluated_uids),
                     "validator/optimizer/outer_lr": self.lr,
                     "validator/optimizer/inner_lr": current_inner_lr,
-                    "validator/network/active_miners": len(self.valid_score_indices),
+                    "validator/network/active_miners": len(self.comms.active_peers),
                     "validator/gather/success_rate": success_rate * 100,
                     "validator/timing/window_total": window_total_time,
                     "validator/timing/peer_update": peer_update_time,
@@ -2064,7 +2114,7 @@ class Validator(BaseNode, Trainer):
                         "evaluated_uids_count": int(len(self.evaluated_uids)),
                         "outer_lr": float(self.lr),
                         "inner_lr": float(current_inner_lr),
-                        "active_miners_count": int(len(self.valid_score_indices)),
+                        "active_miners_count": int(len(self.comms.active_peers)),
                         "gather_success_rate": gather_success_rate,
                         "window_total_time": float(window_total_time),
                         "peer_update_time": float(peer_update_time),

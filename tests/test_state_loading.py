@@ -7,7 +7,7 @@ import torch
 
 
 # --- helpers --------------------------------------------------------------------------------------
-def _make_validator(tmp_path, device="cpu"):
+def _make_validator(tmp_path, device="cpu", is_master=True):
     """
     Build a lightweight Validator with heavy deps mocked away.
     """
@@ -33,6 +33,7 @@ def _make_validator(tmp_path, device="cpu"):
     v = object.__new__(v_cls)  # bypass original __init__
     v.config = cfg
     v.device = device  # Add device attribute for load_state
+    v.is_master = is_master  # Add is_master attribute for distributed support
     v.state_path = os.path.join(tmp_path, "validator-state-TEST.pt")
     v.global_step = 123
     d = device
@@ -212,3 +213,72 @@ async def test_gpu_cpu_roundtrip(tmp_path):
     for name in ("binary_moving_averages", "weights"):
         assert vc.__getattribute__(name).device.type == "cpu"
         assert torch.equal(vc.__getattribute__(name), vg.__getattribute__(name).cpu())
+
+
+# --------------------------------------------------------------------------------------------------
+# DISTRIBUTED MODE TESTS
+# --------------------------------------------------------------------------------------------------
+
+
+async def test_non_master_rank_does_not_save(tmp_path):
+    """
+    Verifies that non-master ranks do not save state to disk.
+    """
+    v = _make_validator(tmp_path, is_master=False)
+
+    # Ensure file doesn't exist before save
+    if os.path.exists(v.state_path):
+        os.remove(v.state_path)
+
+    await v.save_state()
+
+    # File should not be created by non-master rank
+    assert not os.path.exists(v.state_path)
+
+
+def test_non_master_rank_does_not_load(tmp_path):
+    """
+    Verifies that non-master ranks do not load state from disk.
+    """
+    # First create a state file with master rank
+    torch.manual_seed(42)
+    v_master = _make_validator(tmp_path, is_master=True)
+    torch.save(v_master._state_dict(), v_master.state_path)
+
+    # Create non-master validator with different values
+    torch.manual_seed(99)
+    v_non_master = _make_validator(tmp_path, is_master=False)
+
+    # Store original values
+    original_step = v_non_master.global_step
+    original_weights = v_non_master.weights.clone()
+
+    # Try to load state (should be skipped)
+    v_non_master.load_state()
+
+    # Values should remain unchanged
+    assert v_non_master.global_step == original_step
+    assert torch.equal(v_non_master.weights, original_weights)
+
+
+async def test_master_rank_saves_and_loads(tmp_path):
+    """
+    Verifies that master rank properly saves and loads state.
+    """
+    # Create master validator
+    v_master = _make_validator(tmp_path, is_master=True)
+
+    # Save state
+    await v_master.save_state()
+    assert os.path.exists(v_master.state_path)
+
+    # Create new master with different values
+    torch.manual_seed(99)
+    v_master2 = _make_validator(tmp_path, is_master=True)
+
+    # Load state
+    v_master2.load_state()
+
+    # Should have loaded the saved values
+    assert v_master2.global_step == v_master.global_step
+    assert torch.equal(v_master2.weights, v_master.weights)

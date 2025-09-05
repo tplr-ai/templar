@@ -310,20 +310,19 @@ class Validator(BaseNode, Trainer):
 
         # Caching
         self.state_path = f"validator-state-{tplr.__version__}.pt"
+
+        # Initialize state tensors with zeros - will be overwritten by load_state on master
+        d = self.device
+        self.gradient_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.sync_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.final_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.binary_moving_averages = torch.zeros(256, dtype=torch.float32, device=d)
+        self.weights = torch.zeros(256, dtype=torch.float32, device=d)
+
+        # Master rank loads existing state if available
         if os.path.isfile(self.state_path):
-            self.load_state()
-        else:
-            d = self.device
-            self.gradient_scores = torch.zeros(256, dtype=torch.float32, device=d)
-            self.sync_scores = torch.zeros(256, dtype=torch.float32, device=d)
-            self.binary_indicator_scores = torch.zeros(
-                256, dtype=torch.float32, device=d
-            )
-            self.final_scores = torch.zeros(256, dtype=torch.float32, device=d)
-            self.binary_moving_averages = torch.zeros(
-                256, dtype=torch.float32, device=d
-            )
-            self.weights = torch.zeros(256, dtype=torch.float32, device=d)
+            self.load_state()  # Only executes on master rank due to check in load_state()
         self.evaluated_uids = set()
 
         # Add step tracking
@@ -3085,7 +3084,10 @@ class Validator(BaseNode, Trainer):
         }
 
     async def save_state(self):
-        """Saves the current validator state to disk asynchronously."""
+        """Saves the current validator state to disk asynchronously (master rank only)."""
+        if not self.is_master:
+            return
+
         try:
             tplr.log_with_context(
                 level="info",
@@ -3100,7 +3102,7 @@ class Validator(BaseNode, Trainer):
             )
 
     def load_state(self):
-        """Loads the validator state from disk.
+        """Loads the validator state from disk (master rank only).
 
         This method deserializes the validator's state from the configured state path
         and updates the validator's internal state variables. The state includes:
@@ -3121,6 +3123,9 @@ class Validator(BaseNode, Trainer):
         All tensors are converted to float and moved to the configured device.
         Exceptions during loading are caught and logged as warnings.
         """
+        if not self.is_master:
+            return
+
         tplr.logger.info("Loading validator state")
 
         # ── stage 1: read file ─────────────────────────────────────────────

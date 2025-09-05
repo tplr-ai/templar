@@ -99,19 +99,26 @@ class Trainer:
 
         return expected_compressed_params
 
-    def init_model(self, validator=False):
+    def init_model(self, validator=False, meta=False):
         role = "miner"
         if validator:
             role = "validator"
 
-        # Init model with hparams config
-        # Initialize TorchTitan model using model factory
-        self.model = model_factory.initialize_torchtitan_model(
-            hparams=self.hparams,
-            role=role,
-            device=str(self.device),
-            world_size=self.world_size,
-        )
+        if meta:
+            # Create model on meta device (no memory allocation)
+            self.model = model_factory.create_meta_model(
+                hparams=self.hparams,
+                role=role,
+                world_size=self.world_size,
+            )
+        else:
+            # Initialize model with actual weights
+            self.model = model_factory.initialize_torchtitan_model(
+                hparams=self.hparams,
+                role=role,
+                device=str(self.device),
+                world_size=self.world_size,
+            )
         # Get bare model (unwrap DDP if needed)
         self.bare_model = getattr(self.model, "module", self.model)
         self.expected_compressed_params = self.get_expected_params()

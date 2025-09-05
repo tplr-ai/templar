@@ -977,8 +977,23 @@ class Evaluator:
         # Start background tasks
         self.comms.commitments = await self.comms.get_commitments()
 
-        # Get the start window for global_step calculation
-        start_window = await self.comms.get_start_window()
+        # Get the start window for global_step calculation (master fetches, then broadcasts)
+        if self.is_master:
+            start_window = await self.comms.get_start_window()
+            assert start_window is not None
+            self.start_window = start_window
+
+            # Prepare tensor for broadcasting
+            val = -1 if self.start_window is None else self.start_window
+            tensor = torch.tensor([val], dtype=torch.long, device=self.device)
+        else:
+            # Non-master ranks prepare empty tensor
+            tensor = torch.zeros(1, dtype=torch.long, device=self.device)
+
+        # Broadcast start_window to all ranks
+        dist_helper.broadcast(tensor, src=0)
+        val = tensor.item()
+        start_window = None if val == -1 else int(val)
         assert start_window is not None
         self.start_window = start_window
 

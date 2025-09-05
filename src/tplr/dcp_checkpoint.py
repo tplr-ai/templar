@@ -122,7 +122,14 @@ class DCPCheckpointer:
     • Download + DCP load (reshards to miner topology)
     """
 
-    def __init__(self, comms, *, uid: int, version: str, repo_root: str | Path = "."):
+    def __init__(
+        self,
+        comms: "tplr.Comms",
+        *,
+        uid: int,
+        version: str,
+        repo_root: str | Path = ".",
+    ):
         self.comms = comms
         self.uid = int(uid)
         self.version = version
@@ -603,7 +610,7 @@ class DCPCheckpointer:
                 continue
             t0 = time.perf_counter()
             await self.comms.s3_get_object(
-                key=key, bucket=bucket, load_data=False, show_progress=False
+                key=key, bucket=bucket, load_data=False, show_progress=True
             )
             dt = time.perf_counter() - t0
             tplr.logger.debug(
@@ -678,6 +685,49 @@ class DCPCheckpointer:
             return None
         sidecar = json.loads((local_dir / "extra_metadata.json").read_text())
         w = int(sidecar["window"])
-        global_step = int(sidecar["global_step"])
+        global_step = int(sidecar.get("global_step", -1))
         self.load_local(model=model, window=w, process_group=process_group)
         return w, global_step
+
+    async def check_checkpoint_exists(
+        self, *, window: int, prefer_highest_staked: bool = True
+    ) -> bool:
+        """Check if a checkpoint exists without downloading it.
+
+        Args:
+            window: Window number to check
+            prefer_highest_staked: Whether to check highest-staked validator's bucket first
+
+        Returns:
+            True if checkpoint exists and appears complete, False otherwise
+        """
+        try:
+            bucket = await self._choose_read_bucket(
+                prefer_highest_staked=prefer_highest_staked
+            )
+            s3 = await self.comms._get_s3_client(bucket)
+
+            # Check if the window directory exists with essential files
+            prefix = f"checkpoints/{self.version}/{window}/"
+
+            resp = await s3.list_objects_v2(
+                Bucket=bucket.name,
+                Prefix=prefix,
+                MaxKeys=10,  # Just check for a few files
+            )
+
+            objects = resp.get("Contents", [])
+            if not objects:
+                return False
+
+            # Check for essential files
+            has_metadata = any(".metadata" in obj.get("Key", "") for obj in objects)
+            has_shards = any("__0_0.distcp" in obj.get("Key", "") for obj in objects)
+            has_sidecar = any(
+                "extra_metadata.json" in obj.get("Key", "") for obj in objects
+            )
+
+            return has_metadata and has_shards and has_sidecar
+
+        except Exception:
+            return False

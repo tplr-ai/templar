@@ -107,3 +107,7 @@ exclude = [
 
 [tool.ruff.lint]
 select = ["I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tplr", "neurons", "scripts", "tests"]
+known-third-party = ["wandb"]

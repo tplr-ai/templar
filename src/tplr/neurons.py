@@ -31,11 +31,11 @@ from torch.distributed.tensor import DTensor as DT
 from torch.distributed.tensor import distribute_tensor
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
+from wandb.sdk.wandb_run import Run
 
 import tplr
 from tplr.compress import unpack_12bit_indices
 from tplr.distributed import dist_helper
-from wandb.sdk.wandb_run import Run
 
 if TYPE_CHECKING:
     from neurons.miner import Miner

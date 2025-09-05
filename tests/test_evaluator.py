@@ -63,6 +63,9 @@ def setup_evaluator_with_mocks():
         evaluator.comms = MagicMock()
         evaluator.hparams = MagicMock()
         evaluator.hparams.blocks_per_window = 100
+        evaluator.hparams.checkpoint_init_version = (
+            None  # No bootstrap version by default
+        )
         evaluator.ckpt = MagicMock()
 
         # Setup state tracking

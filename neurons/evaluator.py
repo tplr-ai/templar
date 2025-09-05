@@ -877,7 +877,7 @@ class Evaluator:
                     # Calculate global_step
                     global_step = window - self.start_window if window > 0 else 0
                     tplr.logger.info(
-                        "No global step in checkpoint sidecar."
+                        "No global step in checkpoint sidecar. "
                         f"Calculating from start window to be {global_step}."
                     )
 
@@ -1000,14 +1000,24 @@ class Evaluator:
         # Check for initial checkpoint
         latest = await self.check_latest_checkpoint()
 
-        if latest is None and not self.baseline_evaluated:
-            # No checkpoints - run baseline once
+        # Check if bootstrap version is configured
+        bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
+
+        if latest is None and not self.baseline_evaluated and not bootstrap_version:
+            # No checkpoints and no bootstrap - run baseline once
             if self.is_master:
                 tplr.logger.info(
-                    "[Master] No checkpoints found. Running baseline evaluation."
+                    "[Master] No checkpoints found and no bootstrap configured. Running baseline evaluation."
                 )
             if await self.evaluate_window(start_window, is_baseline=True):
                 self.baseline_evaluated = True
+        elif latest is None and bootstrap_version:
+            # No checkpoints but bootstrap configured - skip baseline
+            if self.is_master:
+                tplr.logger.info(
+                    f"[Master] No checkpoints found but bootstrap version {bootstrap_version} configured. "
+                    f"Skipping baseline evaluation."
+                )
         elif latest is not None:
             # Evaluate latest checkpoint
             if self.is_master:

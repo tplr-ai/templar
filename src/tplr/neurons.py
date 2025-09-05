@@ -500,6 +500,101 @@ async def update_peers(instance: NeuronT, window: int, peer_start: float) -> Non
         tplr.logger.info(f"Not time to replace peers: {reason}")
 
 
+async def load_checkpoint_with_fallback(
+    instance: NeuronT,
+) -> tuple[bool, int, int, bool]:
+    """
+    Load checkpoint with fallback logic.
+
+    1. First try loading from current version
+    2. If not found, try bootstrap version if configured
+    3. Return checkpoint status and metadata
+
+    Returns:
+        tuple of (checkpoint_ok, checkpoint_window, global_step, from_bootstrap)
+    """
+    ckpt_ok = False
+    ckpt_sync_win = 0
+    ckpt_global_step = 0
+    from_bootstrap = False
+
+    # First check if current version has any checkpoints
+    latest_current_window = await instance.ckpt._discover_latest(
+        prefer_highest_staked=True
+    )
+
+    if latest_current_window is not None:
+        # Current version checkpoint exists, load it
+        res = await instance.ckpt.download_and_load(
+            model=instance.model,
+            window=latest_current_window,
+            shared_fs=True,
+            process_group=None,
+            prefer_highest_staked=True,
+        )
+        if res is not None:
+            ckpt_ok = True
+            ckpt_sync_win, ckpt_global_step = res
+            instance.model_initialized = True  # Model now has real weights
+            tplr.logger.info(
+                f"Loaded current version checkpoint (window={ckpt_sync_win}, "
+                f"global_step={ckpt_global_step})"
+            )
+
+    # If no current version checkpoint and bootstrap is configured, try that
+    if not ckpt_ok and instance.bootstrap_version:
+        tplr.logger.info(
+            f"No current version checkpoint found, trying bootstrap version "
+            f"{instance.bootstrap_version}"
+        )
+        # Try specific window if configured, otherwise latest
+        bootstrap_window = getattr(instance.hparams, "checkpoint_init_window", None)
+        bootstrap_ckpt = tplr.DCPCheckpointer(
+            instance.comms,
+            uid=instance.uid,
+            version=instance.bootstrap_version,
+            repo_root=".",
+        )
+
+        # If no specific window configured, discover latest in bootstrap version
+        if bootstrap_window is None:
+            bootstrap_window = await bootstrap_ckpt._discover_latest(
+                prefer_highest_staked=True
+            )
+
+        if bootstrap_window is not None:
+            res = await bootstrap_ckpt.download_and_load(
+                model=instance.model,
+                window=bootstrap_window,
+                shared_fs=True,
+                process_group=None,
+                prefer_highest_staked=True,
+            )
+            if res is not None:
+                ckpt_ok = True
+                from_bootstrap = True
+                ckpt_sync_win, ckpt_global_step = res
+                instance.model_initialized = True  # Model now has real weights
+                tplr.logger.info(
+                    f"Loaded bootstrap checkpoint (version={instance.bootstrap_version}, "
+                    f"window={ckpt_sync_win}, global_step={ckpt_global_step})"
+                )
+
+    # Handle global_step calculation if needed
+    if ckpt_ok and ckpt_global_step == -1:
+        # Calculate global_step from window difference if not in checkpoint
+        ckpt_global_step = ckpt_sync_win - instance.start_window
+        tplr.logger.info(
+            f"No global_step in checkpoint, calculated as {ckpt_global_step} "
+            f"(window {ckpt_sync_win} - start {instance.start_window})"
+        )
+
+    if ckpt_ok:
+        instance.global_step = ckpt_global_step
+
+    return ckpt_ok, ckpt_sync_win, ckpt_global_step, from_bootstrap
+
+
 async def catchup_with_aggregation_server(
     instance: NeuronT, checkpoint_current_window: int
 ) -> None:

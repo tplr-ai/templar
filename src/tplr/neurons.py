@@ -581,12 +581,31 @@ async def load_checkpoint_with_fallback(
 
     # Handle global_step calculation if needed
     if ckpt_ok and ckpt_global_step == -1:
-        # Calculate global_step from window difference if not in checkpoint
-        ckpt_global_step = ckpt_sync_win - instance.start_window
-        tplr.logger.info(
-            f"No global_step in checkpoint, calculated as {ckpt_global_step} "
-            f"(window {ckpt_sync_win} - start {instance.start_window})"
-        )
+        if from_bootstrap:
+            # For bootstrap checkpoints, try to get the start_window from that version
+            bootstrap_start_window = await instance.comms.get_start_window(
+                version=instance.bootstrap_version
+            )
+            if bootstrap_start_window is not None:
+                ckpt_global_step = ckpt_sync_win - bootstrap_start_window
+                tplr.logger.info(
+                    f"Bootstrap checkpoint has no global_step, calculated as {ckpt_global_step} "
+                    f"(window {ckpt_sync_win} - bootstrap start {bootstrap_start_window})"
+                )
+            else:
+                # Fallback if we can't get bootstrap start_window
+                ckpt_global_step = 0
+                tplr.logger.info(
+                    f"Bootstrap checkpoint has no global_step and couldn't fetch bootstrap start_window, "
+                    f"setting to 0 (will be corrected during catch-up)"
+                )
+        else:
+            # For current version checkpoints, calculate from window difference
+            ckpt_global_step = ckpt_sync_win - instance.start_window
+            tplr.logger.info(
+                f"No global_step in checkpoint, calculated as {ckpt_global_step} "
+                f"(window {ckpt_sync_win} - start {instance.start_window})"
+            )
 
     if ckpt_ok:
         instance.global_step = ckpt_global_step
@@ -875,7 +894,9 @@ async def catchup_with_aggregation_server(
             is_master=instance.is_master,  # rank-0 handles logging
             world_size=instance.world_size,
             use_dct=instance.hparams.use_dct,
-            wandb_run=instance.wandb if instance.is_master else None,
+            wandb_run=instance.wandb
+            if instance.is_master and isinstance(instance.wandb, Run)
+            else None,
             global_step=instance.global_step,
         )
 

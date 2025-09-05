@@ -368,18 +368,19 @@ class Miner(BaseNode, Trainer):
                 instance=self, window=self.current_window, peer_start=peer_start
             )
 
-            self.start_window = await self.comms.get_start_window()
-            tplr.logger.info(f"Using start_window: {self.start_window}")
+            start_window = await self.comms.get_start_window()
+            tplr.logger.info(f"Using start_window: {start_window}")
 
-            val = -1 if self.start_window is None else self.start_window
+            val = -1 if start_window is None else start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
         else:
             tensor = torch.zeros(1, dtype=torch.long, device=self.device)
 
         dist_helper.broadcast(tensor, src=0)
         val = tensor.item()
-        self.start_window = None if val == -1 else int(val)
-        assert self.start_window is not None
+        start_window = None if val == -1 else int(val)
+        assert start_window is not None
+        self.start_window = start_window
 
         # global_step tracks actual outer steps performed (starts at 0)
         self.global_step = 0

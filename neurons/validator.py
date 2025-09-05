@@ -773,6 +773,7 @@ class Validator(BaseNode, Trainer):
             self.comms.update_peers_with_buckets()
             tplr.logger.info("Loaded commitments")
 
+        tensor = torch.tensor([0], dtype=torch.long, device=self.device)
         # Handle start_window similar to miner - only master rank checks and posts
         if self.is_master:
             peer_start = tplr.T()
@@ -784,43 +785,41 @@ class Validator(BaseNode, Trainer):
             if self.uid == self.comms.metagraph.S.argmax().item():
                 # Check if an existing start window already exists
                 try:
-                    existing_start_window = await self.comms.get_start_window(retries=2)
+                    start_window = await self.comms.get_start_window(retries=2)
                 except Exception as e:
                     tplr.logger.warning(f"Error fetching existing start_window: {e}")
-                    existing_start_window = None
+                    start_window = None
 
-                if existing_start_window is not None:
-                    self.start_window = existing_start_window
+                if start_window is not None:
                     tplr.logger.info(
-                        f"Highest staked validator found existing start_window: {self.start_window}"
+                        f"Highest staked validator found existing start_window: {start_window}"
                     )
                 else:
                     # No existing start window, so post new start window to R2
                     await self.comms.post_start_window(cast(int, self.start_window))
+                    start_window = self.start_window
                     tplr.logger.info(
-                        f"This validator is the highest staked. Posted start_window: {self.start_window}"
+                        f"This validator is the highest staked. Posted start_window: {start_window}"
                     )
             else:
                 tplr.logger.info(
                     "This validator is not the highest staked. Waiting to fetch start_window."
                 )
-                self.start_window = await self.comms.get_start_window()
+                start_window = await self.comms.get_start_window()
 
             # Broadcast start_window to all ranks if distributed
-            val = -1 if self.start_window is None else self.start_window
+            val = -1 if start_window is None else start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
-            dist_helper.broadcast(tensor, src=0)
-        else:
-            # Non-master ranks receive start_window via broadcast
-            tensor = torch.tensor([0], dtype=torch.long, device=self.device)
-            dist_helper.broadcast(tensor, src=0)
-            val = tensor.item()
-            self.start_window = None if val == -1 else int(val)
 
-        if self.start_window is None:
+        dist_helper.broadcast(tensor, src=0)
+        val = tensor.item()
+        start_window = None if val == -1 else int(val)
+
+        if start_window is None:
             raise RuntimeError(
                 "Could not find a valid start window. This should not be possible."
             )
+        self.start_window = start_window
 
         # global_step tracks actual outer steps performed (starts at 0)
         self.global_step = 0

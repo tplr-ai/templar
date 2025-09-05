@@ -40,6 +40,7 @@ dependencies = [
     "dnspython>=2.7.0",
     "torchtitan",
     "pydantic>=2.11.7",
+    "ruff>=0.12.12",
 ]
 
 [tool.setuptools.dynamic]

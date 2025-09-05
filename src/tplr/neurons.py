@@ -595,6 +595,63 @@ async def load_checkpoint_with_fallback(
     return ckpt_ok, ckpt_sync_win, ckpt_global_step, from_bootstrap
 
 
+async def handle_checkpoint_catchup(
+    instance: NeuronT,
+    ckpt_ok: bool,
+    ckpt_sync_win: int,
+    ckpt_global_step: int,
+    from_bootstrap: bool,
+) -> None:
+    """
+    Handle catch-up logic after checkpoint loading and replay scheduler steps.
+
+    Args:
+        instance: Miner or Validator instance
+        ckpt_ok: Whether a checkpoint was successfully loaded
+        ckpt_sync_win: Window number from checkpoint
+        ckpt_global_step: Global step from checkpoint
+        from_bootstrap: Whether checkpoint was from bootstrap version
+    """
+    # Decide catch-up windows and run catch-up on ALL ranks
+    # When loading from bootstrap, we always need to catch up from start_window
+    # to ensure we're using current version's gradients
+    if not ckpt_ok:
+        # No checkpoint found, catch up from start_window
+        tplr.logger.info("No checkpoint found, will catch up from start_window")
+        await catchup_with_aggregation_server(instance, instance.start_window)
+    elif from_bootstrap:
+        # Loading from bootstrap, catch up from start_window with current version gradients
+        tplr.logger.info(
+            f"Loaded bootstrap checkpoint, catching up from start_window "
+            f"{instance.start_window} to {instance.current_window}"
+        )
+        await catchup_with_aggregation_server(instance, instance.start_window)
+    elif ckpt_sync_win < instance.current_window:
+        # Current version checkpoint is behind, catch up from checkpoint window
+        catch_up_start = max(ckpt_sync_win, instance.start_window)
+        tplr.logger.info(
+            f"Checkpoint at window {ckpt_sync_win} is behind current {instance.current_window}, "
+            f"catching up from {catch_up_start}"
+        )
+        await catchup_with_aggregation_server(instance, catch_up_start)
+    else:
+        tplr.logger.info(
+            f"Checkpoint at window {ckpt_sync_win} is up to date with current window "
+            f"{instance.current_window}"
+        )
+
+    # Replay scheduler steps based on windows completed from checkpoint
+    # ckpt_global_step tracks windows, scheduler needs inner_steps per window
+    total_inner_steps = ckpt_global_step * instance.hparams.inner_steps
+    if total_inner_steps > 0:
+        for _ in range(total_inner_steps):
+            instance.inner_scheduler.step()
+        tplr.logger.info(
+            f"Replayed {total_inner_steps} scheduler steps (checkpoint global_step="
+            f"{ckpt_global_step} * {instance.hparams.inner_steps} inner_steps)"
+        )
+
+
 async def catchup_with_aggregation_server(
     instance: NeuronT, checkpoint_current_window: int
 ) -> None:

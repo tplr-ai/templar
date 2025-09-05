@@ -233,7 +233,11 @@ class Validator(BaseNode, Trainer):
         self.device = torch.device(self.config.device)
         tplr.logger.info(f"[Init] device set → {self.device}")
 
-        self.init_model(validator=True)
+        # Initialize model on meta device first
+        self.init_model(validator=True, meta=True)
+        # Move model from meta to actual device (allocates memory but no initialization)
+        self.model = self.model.to_empty(device=str(self.device))
+        self.model_initialized = False  # Track if model has actual weights
         self.ckpt = tplr.DCPCheckpointer(
             self.comms, uid=self.uid, version=tplr.__version__
         )
@@ -766,12 +770,10 @@ class Validator(BaseNode, Trainer):
             self.comms.peers = self.config.peers
 
         # Only master fetches commitments and updates peers
+        self.comms.commitments = await self.comms.get_commitments()
         if self.is_master:
-            self.comms.commitments = await self.comms.get_commitments()
             self.comms.update_peers_with_buckets()
             tplr.logger.info("Loaded commitments")
-        else:
-            self.comms.commitments = {}
 
         # Handle start_window similar to miner - only master rank checks and posts
         if self.is_master:
@@ -832,8 +834,25 @@ class Validator(BaseNode, Trainer):
         _ = await self.dataset_manager.initialize_datasets(current_shard)
         self.set_dataloader(validator=True)
 
-        # Load the most recent checkpoint
-        _ = await self.load_checkpoint()
+        # Load checkpoint using consolidated logic
+        (
+            ckpt_ok,
+            ckpt_sync_win,
+            ckpt_global_step,
+            from_bootstrap,
+        ) = await tplr.neurons.load_checkpoint_with_fallback(self)
+
+        # If no checkpoint was loaded, initialize model weights now
+        if not self.model_initialized:
+            tplr.logger.info("No checkpoint loaded, initializing model weights...")
+            # Initialize weights using the same deterministic init as model_factory
+            self.init_model(validator=True, meta=False)
+            self.model_initialized = True
+
+        # Handle catch-up and scheduler replay using consolidated logic
+        await tplr.neurons.handle_checkpoint_catchup(
+            self, ckpt_ok, ckpt_sync_win, ckpt_global_step, from_bootstrap
+        )
 
         if self.is_master:
             self.comms.start_commitment_fetcher()
@@ -3176,68 +3195,6 @@ class Validator(BaseNode, Trainer):
             )
         except Exception as e:
             tplr.logger.warning(f"Failed to restore OpenSkill ratings: {e}")
-
-    async def load_checkpoint(self) -> None:
-        checkpoint_window_buffer = 5
-        has_new_checkpoint = (
-            self.global_step
-            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
-        )
-        # Proceed to load checkpoint
-        #   • rank-0 (or single-GPU run) downloads & catches-up
-        #   • remaining ranks receive state via NCCL broadcast
-        res = await self.ckpt.download_and_load(
-            model=self.model,
-            window=None,  # latest
-            shared_fs=True,
-            process_group=None,
-            prefer_highest_staked=True,
-        )
-        if res is not None:
-            ckpt_ok = True
-            ckpt_sync_win, ckpt_global_step = res
-        else:
-            ckpt_ok = False
-            ckpt_sync_win, ckpt_global_step = 0, self.global_step
-
-        assert self.start_window is not None
-        if ckpt_ok:
-            self.global_step = ckpt_global_step  # Restore global_step from checkpoint
-            tplr.logger.info(
-                f"Checkpoint loaded (sync_window={ckpt_sync_win}, global_step={ckpt_global_step})"
-            )
-        else:
-            tplr.logger.info("No checkpoint found – starting from scratch")
-
-        # Decide catch-up windows and run catch-up on ALL ranks (avoids DTensor collective hangs)
-        need_catchup = (not ckpt_ok) or (
-            ckpt_ok
-            and ckpt_sync_win < self.current_window
-            and self.global_step > checkpoint_window_buffer
-        )
-
-        if need_catchup:
-            start_from = (
-                self.start_window
-                if not ckpt_ok
-                else max(ckpt_sync_win, self.start_window)
-            )
-            tplr.logger.info(
-                f"Checkpoint is behind current window ({ckpt_sync_win} < {self.current_window}), starting catchup..."
-            )
-            await tplr.neurons.catchup_with_aggregation_server(self, start_from)
-        else:
-            tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
-
-        # Replay scheduler steps if checkpoint was loaded
-        if ckpt_ok:
-            steps_to_replay = (
-                ckpt_sync_win - self.start_window + 1
-            ) * self.hparams.inner_steps
-            for _ in range(steps_to_replay):
-                self.inner_scheduler.step()
-
-        return
 
     def bin_evaluation_peers(self, num_bins: int) -> dict[int, list[int]]:
         """

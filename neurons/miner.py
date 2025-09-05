@@ -194,8 +194,12 @@ class Miner(BaseNode, Trainer):
         tplr.logger.info("[Init] Bittensor wallet loaded")
         super().__init__()
 
-        self.init_model()
+        # Initialize model on meta device first
+        self.init_model(meta=True)
+        # Move model from meta to actual device (allocates memory but no initialization)
+        self.model = self.model.to_empty(device=str(self.device))
         self.bare_model = getattr(self.model, "module", self.model)
+        self.model_initialized = False  # Track if model has actual weights
 
         # Store parallelization parameters for later use
         tt = getattr(self.hparams, "torchtitan", SimpleNamespace())
@@ -398,57 +402,33 @@ class Miner(BaseNode, Trainer):
         # All workers need to instantiate dataloader
         self.set_dataloader()
 
-        checkpoint_window_buffer = 5
-        has_new_checkpoint = (
-            self.global_step
-            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
-        )
         # ------------------------------------------------------------------
-        # Proceed to load checkpoint
+        # Proceed to load checkpoint using consolidated logic
+        #   • Check if current version checkpoint exists
+        #   • If not, fall back to bootstrap version if configured
         #   • rank-0 (or single-GPU run) downloads & catches-up
         #   • remaining ranks receive state via NCCL broadcast
         # ------------------------------------------------------------------
 
-        res = await self.ckpt.download_and_load(
-            model=self.model,
-            window=None,  # latest
-            shared_fs=True,
-            process_group=None,
-            prefer_highest_staked=True,
+        # Use consolidated checkpoint loading function
+        (
+            ckpt_ok,
+            ckpt_sync_win,
+            ckpt_global_step,
+            from_bootstrap,
+        ) = await tplr.neurons.load_checkpoint_with_fallback(self)
+
+        # If no checkpoint was loaded, initialize model weights now
+        if not self.model_initialized:
+            tplr.logger.info("No checkpoint loaded, initializing model weights...")
+            # Initialize weights using the same deterministic init as model_factory
+            self.init_model(meta=False)
+            self.model_initialized = True
+
+        # Handle catch-up and scheduler replay using consolidated logic
+        await tplr.neurons.handle_checkpoint_catchup(
+            self, ckpt_ok, ckpt_sync_win, ckpt_global_step, from_bootstrap
         )
-        if res is not None:
-            ckpt_ok = True
-            ckpt_sync_win, ckpt_global_step = res
-        else:
-            ckpt_ok = False
-            ckpt_sync_win, ckpt_global_step = 0, self.global_step
-
-        if ckpt_ok:
-            self.global_step = ckpt_global_step  # Restore global_step from checkpoint
-            tplr.logger.info(
-                f"Checkpoint loaded (sync_window={ckpt_sync_win}, global_step={ckpt_global_step})"
-            )
-
-        # Decide catch-up windows and run catch-up on ALL ranks (avoids DTensor collective hangs)
-        need_catchup = (not ckpt_ok) or (
-            ckpt_ok
-            and ckpt_sync_win < self.current_window
-            and self.global_step > checkpoint_window_buffer
-        )
-        if need_catchup:
-            start_from = (
-                self.start_window
-                if not ckpt_ok
-                else max(ckpt_sync_win, self.start_window)
-            )
-            await tplr.neurons.catchup_with_aggregation_server(self, start_from)
-
-        if ckpt_ok:
-            steps_to_replay = (
-                ckpt_sync_win - self.start_window + 1
-            ) * self.hparams.inner_steps
-            for _ in range(steps_to_replay):
-                self.inner_scheduler.step()
 
         self.comms.start_commitment_fetcher()
 
@@ -515,7 +495,7 @@ class Miner(BaseNode, Trainer):
             null_round = window_offset < self.warmup_windows
             if null_round:
                 tplr.logger.info(
-                    f"Start accumulating... (null round: {self.global_step + 1}/{self.warmup_windows})"
+                    f"Start accumulating... (null round: warmup {window_offset + 1}/{self.warmup_windows})"
                 )
             else:
                 tplr.logger.info("Start accumulating...")

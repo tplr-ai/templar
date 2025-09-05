@@ -343,7 +343,7 @@ class Miner(BaseNode, Trainer):
             world_size=self.world_size,
             comms=self.comms,
         )
-        self.windows_per_shard = getattr(self.hparams, "windows_per_shard")
+        self.outer_steps_per_shard = getattr(self.hparams, "outer_steps_per_shard")
 
         tplr.logger.info("[Init] ✔ fully done – entering run()")
 
@@ -384,7 +384,7 @@ class Miner(BaseNode, Trainer):
         # global_step tracks actual outer steps performed (starts at 0)
         self.global_step = 0
         window_offset = self.current_window - (self.start_window or self.current_window)
-        current_shard = window_offset // self.windows_per_shard
+        current_shard = window_offset // self.outer_steps_per_shard
         tplr.logger.info(
             f"Starting with global_step=0 (actual outer steps), window offset={window_offset}"
         )
@@ -472,7 +472,10 @@ class Miner(BaseNode, Trainer):
 
             # Check if we need to swap dataset based on actual outer steps taken
             # Note: Since global_step is incremented AFTER the outer step, we check before incrementing
-            if self.global_step > 0 and self.global_step % self.windows_per_shard == 0:
+            if (
+                self.global_step > 0
+                and self.global_step % self.outer_steps_per_shard == 0
+            ):
                 tplr.logger.info(
                     f"Swapping dataset after {self.global_step} outer steps at window {step_window}"
                 )

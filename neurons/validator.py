@@ -377,7 +377,7 @@ class Validator(BaseNode, Trainer):
         self.prev_param_state: dict[str, torch.Tensor] = {}
         self.param_change_alpha = 0.2
 
-        self.windows_per_shard = getattr(self.hparams, "windows_per_shard")
+        self.outer_steps_per_shard = getattr(self.hparams, "outer_steps_per_shard")
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
             rank=self.rank,
@@ -828,7 +828,7 @@ class Validator(BaseNode, Trainer):
             f"Using start_window: {self.start_window}, global_step: {self.global_step}"
         )
 
-        current_shard = self.global_step // self.windows_per_shard
+        current_shard = self.global_step // self.outer_steps_per_shard
         _ = await self.dataset_manager.initialize_datasets(current_shard)
         self.set_dataloader(validator=True)
 
@@ -881,7 +881,10 @@ class Validator(BaseNode, Trainer):
             window_start = tplr.T()
 
             # Check if we need to swap dataset based on actual outer steps taken
-            if self.global_step > 0 and self.global_step % self.windows_per_shard == 0:
+            if (
+                self.global_step > 0
+                and self.global_step % self.outer_steps_per_shard == 0
+            ):
                 tplr.logger.info(f"Swapping dataset at window {self.current_window}")
                 await self.dataset_manager.swap_datasets()
                 self.set_dataloader(validator=True)

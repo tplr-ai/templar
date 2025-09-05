@@ -244,8 +244,7 @@ def outer_step(
       - Calls optimizer.step() per param (others have grad=None, so they're skipped).
       - Frees all temporaries and grad immediately after each step.
     """
-    bare_model = getattr(model, "module", model)
-    bare_model.train()
+    model.train()
 
     # Free any existing grads entirely (do not allocate zeros)
     optimizer.zero_grad(set_to_none=True)
@@ -276,7 +275,7 @@ def outer_step(
     min_median_norm = float("inf")
     max_median_norm = float("-inf")
 
-    for name, p in bare_model.named_parameters():
+    for name, p in model.named_parameters():
         # ---- master decides if this param has an update; others receive a flag ----
         has_update = 0
         payload = None
@@ -923,8 +922,7 @@ async def catchup_with_aggregation_server(
                     debug_dict = debug_fetch.data  # validator's payload
 
                     # --- update EMA of parameter‑slice changes ------------------
-                    bare_model = getattr(instance.model, "module", instance.model)
-                    for name, p in bare_model.named_parameters():
+                    for name, p in instance.model.named_parameters():
                         if p.numel() < 2:
                             continue
 
@@ -1134,8 +1132,7 @@ async def check_uid_index_overlap(
     total_weight = 0.0
 
     # ── 2. iterate over parameters that have compressed indices ───────────
-    bare_model = getattr(neuron.model, "module", neuron.model)
-    for pname, _ in bare_model.named_parameters():
+    for pname, _ in neuron.model.named_parameters():
         idx_key = pname + "idxs"
         idxs_all = getattr(gather_result.state_dict, idx_key, None)
         if idxs_all is None:

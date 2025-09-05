@@ -119,8 +119,6 @@ class Trainer:
                 device=str(self.device),
                 world_size=self.world_size,
             )
-        # Get bare model (unwrap DDP if needed)
-        self.bare_model = getattr(self.model, "module", self.model)
         self.expected_compressed_params = self.get_expected_params()
         self.tokenizer = self.hparams.tokenizer
 
@@ -217,7 +215,6 @@ class Trainer:
                 )
             elif optimizer_type == "muon":
                 # Get bare model for parameter grouping
-                bare_model = getattr(self.model, "module", self.model)
 
                 # Get Muon-specific config
                 muon_config = optimizer_config.get("muon", {})
@@ -237,7 +234,7 @@ class Trainer:
                 scalar_params = []
                 head_params = []
 
-                for name, param in bare_model.named_parameters():
+                for name, param in self.model.named_parameters():
                     if not param.requires_grad:
                         continue
 

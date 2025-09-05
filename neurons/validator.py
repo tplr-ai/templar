@@ -259,9 +259,7 @@ class Validator(BaseNode, Trainer):
 
         self.xshapes = {}
         self.totalks = {}
-        # Use bare_model like the miner does to ensure consistent parameter iteration
         for n, p in self.model.named_parameters():
-            # Use the same approach as miner for creating xshapes and totalks
             enc = self.transformer.encode(
                 torch.empty(p.shape, dtype=torch.float16, device=self.device),
                 use_dct=self.hparams.use_dct,

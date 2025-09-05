@@ -198,7 +198,6 @@ class Miner(BaseNode, Trainer):
         self.init_model(meta=True)
         # Move model from meta to actual device (allocates memory but no initialization)
         self.model = self.model.to_empty(device=str(self.device))
-        self.bare_model = getattr(self.model, "module", self.model)
         self.model_initialized = False  # Track if model has actual weights
 
         # Store parallelization parameters for later use
@@ -229,7 +228,7 @@ class Miner(BaseNode, Trainer):
 
         self.xshapes = {}
         self.totalks = {}
-        model_iterator = self.bare_model.named_parameters()
+        model_iterator = self.model.named_parameters()
 
         for idx, (n, p) in enumerate(model_iterator):
             if idx % self.world_size == self.rank:
@@ -713,7 +712,7 @@ class Miner(BaseNode, Trainer):
                 debug_dict = {}
 
                 # Add model parameters debug info
-                for name, param in self.bare_model.named_parameters():
+                for name, param in self.model.named_parameters():
                     if param is not None:
                         # Handle DTensor vs regular tensor
                         if isinstance(param, DT):

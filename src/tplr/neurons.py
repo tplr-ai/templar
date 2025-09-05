@@ -35,6 +35,7 @@ from wandb.sdk.wandb_run import Run
 
 import tplr
 from tplr.compress import unpack_12bit_indices
+from tplr.distributed import dist_helper
 
 if TYPE_CHECKING:
     from neurons.miner import Miner
@@ -684,25 +685,23 @@ async def catchup_with_aggregation_server(
             gather_ns = None
 
         # Broadcast whether we should skip this window (master decides)
-        skip_window = False
-        if dist.is_available() and dist.is_initialized():
-            if instance.is_master:
-                skip_flag = 1 if gather_ns is None else 0
-                skip_tensor = torch.tensor(
-                    [skip_flag], dtype=torch.int32, device=instance.config.device
-                )
-            else:
-                skip_tensor = torch.tensor(
-                    [0], dtype=torch.int32, device=instance.config.device
-                )
-            dist.broadcast(skip_tensor, src=0)
-            skip_window = bool(skip_tensor.item())
-        elif instance.is_master and gather_ns is None:
-            skip_window = True
+        if instance.is_master:
+            skip_tensor = torch.tensor(
+                [1 if gather_ns is None else 0],
+                dtype=torch.int32,
+                device=instance.config.device,
+            )
+        else:
+            skip_tensor = torch.tensor(
+                [0], dtype=torch.int32, device=instance.config.device
+            )
+
+        dist_helper.broadcast(skip_tensor, src=0)
+        skip_window = bool(skip_tensor.item())
 
         # If skipping, continue to next window without updating scheduler
         if skip_window:
-            instance.global_step = start_w - instance.start_window
+            # Don't increment global_step as no outer step was performed
             start_w += 1
             continue
 
@@ -711,12 +710,7 @@ async def catchup_with_aggregation_server(
         # ------------------------------------------------------------------
         # Synchronize all ranks before applying the outer step to ensure
         # they're processing the same window together
-        if dist.is_available() and dist.is_initialized():
-            if torch.cuda.is_available():
-                device_id = torch.cuda.current_device()
-                dist.barrier(device_ids=[device_id])
-            else:
-                dist.barrier()
+        dist_helper.safe_barrier("catchup_pre_outer_step", instance.local_rank)
 
         outer_step(
             instance.model,
@@ -827,21 +821,15 @@ async def catchup_with_aggregation_server(
         except Exception as exc:
             tplr.logger.warning(f"[catch‑up] debug‑dict processing error: {exc}")
 
-        instance.global_step = start_w - instance.start_window
+        # Increment global_step since we performed an outer step
+        instance.global_step += 1
         start_w += 1
 
-        if dist.is_available() and dist.is_initialized():
-            if torch.cuda.is_available():
-                device_id = torch.cuda.current_device()
-                dist.barrier(device_ids=[device_id])
-            else:
-                dist.barrier()
+        dist_helper.safe_barrier("catchup_post_window", instance.local_rank)
 
         # If the chain progressed while we were busy, extend the target.
         if instance.current_window > target_w:
             target_w = instance.current_window
-
-    instance.global_step = target_w - instance.start_window
 
     # Final aggressive memory cleanup
     gc.collect()

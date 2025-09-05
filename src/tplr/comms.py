@@ -2022,6 +2022,11 @@ class Comms(ChainManager):
             f"final_success={len(primary.uids)}/{target} "
             f"({primary.success_rate:.1%}) | total_skipped={primary.skipped_uids}"
         )
+
+        # Return None if no gradients were successfully gathered
+        if len(primary.uids) == 0:
+            return None
+
         return primary
 
     ## Peer Management

@@ -67,7 +67,6 @@ class Miner(BaseNode, Trainer):
         """Check if available memory is below threshold and cleanup if needed"""
         if torch.cuda.is_available():
             allocated = torch.cuda.memory_allocated(self.device) / 1024**3
-            reserved = torch.cuda.memory_reserved(self.device) / 1024**3
             max_memory = (
                 torch.cuda.get_device_properties(self.device).total_memory / 1024**3
             )
@@ -379,9 +378,13 @@ class Miner(BaseNode, Trainer):
         self.start_window = None if val == -1 else int(val)
         assert self.start_window is not None
 
-        self.global_step = self.current_window - self.start_window
-        current_shard = self.global_step // self.windows_per_shard
-        tplr.logger.info(f"starting at Global Step : {self.global_step}")
+        # global_step tracks actual outer steps performed (starts at 0)
+        self.global_step = 0
+        window_offset = self.current_window - (self.start_window or self.current_window)
+        current_shard = window_offset // self.windows_per_shard
+        tplr.logger.info(
+            f"Starting with global_step=0 (actual outer steps), window offset={window_offset}"
+        )
 
         if self.is_master:
             _ = await self.dataset_manager.initialize_datasets(current_shard)
@@ -406,14 +409,25 @@ class Miner(BaseNode, Trainer):
         #   • remaining ranks receive state via NCCL broadcast
         # ------------------------------------------------------------------
 
-        ckpt_sync_win = await self.ckpt.download_and_load(
+        res = await self.ckpt.download_and_load(
             model=self.model,
             window=None,  # latest
             shared_fs=True,
             process_group=None,
             prefer_highest_staked=True,
         )
-        ckpt_ok = ckpt_sync_win is not None
+        if res is not None:
+            ckpt_ok = True
+            ckpt_sync_win, ckpt_global_step = res
+        else:
+            ckpt_ok = False
+            ckpt_sync_win, ckpt_global_step = 0, self.global_step
+
+        if ckpt_ok:
+            self.global_step = ckpt_global_step  # Restore global_step from checkpoint
+            tplr.logger.info(
+                f"Checkpoint loaded (sync_window={ckpt_sync_win}, global_step={ckpt_global_step})"
+            )
 
         # Decide catch-up windows and run catch-up on ALL ranks (avoids DTensor collective hangs)
         need_catchup = (not ckpt_ok) or (
@@ -459,11 +473,9 @@ class Miner(BaseNode, Trainer):
             window_start = tplr.T()
             # Start the gather in the background:
             step_window = self.current_window
-            self.global_step = (
-                self.current_window - self.start_window
-            )  # Update global_step
+            # global_step will be incremented only when we do an actual outer step
             tplr.logger.info(
-                f"\n{'-' * 40} Window: {step_window} (Global Step: {self.global_step}) {'-' * 40}"
+                f"\n{'-' * 40} Window: {step_window} (Outer Steps Taken: {self.global_step}) {'-' * 40}"
             )
 
             peer_start = tplr.T()
@@ -479,8 +491,12 @@ class Miner(BaseNode, Trainer):
             # Update sampler for current window
             self.sampler.set_window_uid(self.uid, step_window)
 
+            # Check if we need to swap dataset based on actual outer steps taken
+            # Note: Since global_step is incremented AFTER the outer step, we check before incrementing
             if self.global_step > 0 and self.global_step % self.windows_per_shard == 0:
-                tplr.logger.info(f"Swapping dataset at window {step_window}")
+                tplr.logger.info(
+                    f"Swapping dataset after {self.global_step} outer steps at window {step_window}"
+                )
                 await self.dataset_manager.swap_datasets()
                 self.set_dataloader()
                 dist_helper.safe_barrier("sync_shard_switch", self.local_rank)
@@ -493,7 +509,10 @@ class Miner(BaseNode, Trainer):
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
             # Check if we're in a null round (warmup phase)
-            null_round = self.global_step < self.warmup_windows
+            window_offset = self.current_window - (
+                self.start_window or self.current_window
+            )
+            null_round = window_offset < self.warmup_windows
             if null_round:
                 tplr.logger.info(
                     f"Start accumulating... (null round: {self.global_step + 1}/{self.warmup_windows})"
@@ -642,6 +661,8 @@ class Miner(BaseNode, Trainer):
 
             gather_result = None
             gather_time = 0.0
+            should_update = True
+
             if self.is_master:
                 gather_start = tplr.T()
                 tplr.logger.info("Waiting on gather task...")
@@ -663,6 +684,12 @@ class Miner(BaseNode, Trainer):
                 )
                 tplr.logger.info("Gather task completed!")
                 gather_time = tplr.T() - gather_start
+                should_update = gather_result is not None
+
+            # Broadcast whether we should update to all ranks
+            should_update = dist_helper.all_ok(
+                should_update, self.device, "gather_update"
+            )
 
             # 5. Calculate and log metrics
             self.total_tokens_processed += window_tokens
@@ -684,10 +711,22 @@ class Miner(BaseNode, Trainer):
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
             update_start = tplr.T()
-            _ = self.outer_step(gather_result)
 
-            model_update_time = tplr.T() - update_start
-            tplr.logger.info(f"{tplr.P(step_window, model_update_time)} Updated model")
+            # Only perform outer step and increment counter if we have gradients to apply
+            if should_update:
+                _ = self.outer_step(gather_result)
+                self.global_step += (
+                    1  # Increment only when we actually do an outer step
+                )
+                model_update_time = tplr.T() - update_start
+                tplr.logger.info(
+                    f"{tplr.P(step_window, model_update_time)} Updated model (Outer step #{self.global_step})"
+                )
+            else:
+                model_update_time = 0.0
+                tplr.logger.info(
+                    f"{tplr.P(step_window, 0)} Skipped outer step (no gradients gathered)"
+                )
 
             if self.is_master:
                 # Add debug data including successfully gathered peers
@@ -763,42 +802,45 @@ class Miner(BaseNode, Trainer):
                 )
                 inner_lr = self.inner_scheduler.get_last_lr()[0]
 
-                self.wandb.log(
-                    {
-                        # Add timing metrics
-                        "miner/timing/window_total": window_total_time,
-                        "miner/timing/peer_update": peer_update_time,
-                        "miner/timing/data_loading": data_loading_time,
-                        "miner/timing/training": training_time,
-                        "miner/timing/compression": compression_time,
-                        "miner/timing/gather": gather_time,
-                        "miner/timing/put": put_time,
-                        "miner/timing/model_update": model_update_time,
-                        # Existing metrics
-                        "miner/window_entry_loss": window_entry_loss,
-                        "miner/tokens_per_sec": tokens_per_sec,
-                        "miner/total_tokens": self.total_tokens_processed,
-                        "miner/batch_tokens": window_tokens,
-                        "miner/global_step": self.global_step,
-                        "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
-                        / 1024**2,
-                        "miner/gpu_memory_cached": torch.cuda.memory_reserved()
-                        / 1024**2,
-                        "miner/gather_peers": len(self.comms.peers),
-                        "miner/effective_batch_size": len(self.comms.peers)
-                        * self.hparams.batch_size,
-                        "miner/inner_lr": inner_lr,
-                        "miner/mean_grad_norm": mean_grad_norm,
-                        "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
-                        "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
-                        "miner/grad_norm_std": grad_norm_std,
-                        "miner/mean_weight_norm": mean_weight_norm,
-                        "miner/mean_momentum_norm": mean_momentum_norm,
-                        # Added gather success rate in %
-                        "miner/gather/success_rate": gather_success_rate,
-                    },
-                    step=self.global_step,
-                )
+                # Only log to WandB when we've performed an outer step
+                # This ensures step values are unique and represent actual optimization steps
+                if gather_result is not None:
+                    self.wandb.log(
+                        {
+                            # Add timing metrics
+                            "miner/timing/window_total": window_total_time,
+                            "miner/timing/peer_update": peer_update_time,
+                            "miner/timing/data_loading": data_loading_time,
+                            "miner/timing/training": training_time,
+                            "miner/timing/compression": compression_time,
+                            "miner/timing/gather": gather_time,
+                            "miner/timing/put": put_time,
+                            "miner/timing/model_update": model_update_time,
+                            # Existing metrics
+                            "miner/window_entry_loss": window_entry_loss,
+                            "miner/tokens_per_sec": tokens_per_sec,
+                            "miner/total_tokens": self.total_tokens_processed,
+                            "miner/batch_tokens": window_tokens,
+                            "miner/global_step": self.global_step,
+                            "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
+                            / 1024**2,
+                            "miner/gpu_memory_cached": torch.cuda.memory_reserved()
+                            / 1024**2,
+                            "miner/gather_peers": len(self.comms.peers),
+                            "miner/effective_batch_size": len(self.comms.peers)
+                            * self.hparams.batch_size,
+                            "miner/inner_lr": inner_lr,
+                            "miner/mean_grad_norm": mean_grad_norm,
+                            "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
+                            "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
+                            "miner/grad_norm_std": grad_norm_std,
+                            "miner/mean_weight_norm": mean_weight_norm,
+                            "miner/mean_momentum_norm": mean_momentum_norm,
+                            # Added gather success rate in %
+                            "miner/gather/success_rate": gather_success_rate,
+                        },
+                        step=self.global_step,
+                    )
 
                 self.metrics_logger.log(
                     measurement="training_step_v2",
@@ -825,8 +867,8 @@ class Miner(BaseNode, Trainer):
                 )
                 tplr.logger.info("Finished metrics logging call for miner")
 
-            self.global_step += 1
-            tplr.logger.info(f"Total optimization steps: {self.global_step}")
+            # global_step is now incremented only when outer_step is performed
+            tplr.logger.info(f"Total outer steps taken: {self.global_step}")
 
             dist_helper.safe_barrier("post_outer_step", self.local_rank)
 

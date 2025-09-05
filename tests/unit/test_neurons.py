@@ -276,6 +276,8 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         self.instance.hparams.use_dct = False
         self.instance.hparams.inner_steps = 10
         self.instance.hparams.time_window_delta_seconds = 10
+        self.instance.local_rank = 0  # Add local_rank for dist_helper.safe_barrier
+        self.instance.global_step = 0  # Add global_step for tracking outer steps
         self.instance.loop = MagicMock()
         self.instance.loop.run_in_executor = AsyncMock(return_value=12345)
         self.instance.query_block_timestamp = MagicMock(return_value=12345)
@@ -283,8 +285,8 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
     def tearDown(self):
         self.cuda_patch.stop()
 
-    @patch("torch.distributed.barrier")
-    @patch("torch.distributed.broadcast")
+    @patch("tplr.distributed.dist_helper.safe_barrier")
+    @patch("tplr.distributed.dist_helper.broadcast")
     @patch("torch.distributed.is_initialized", return_value=True)
     @patch("torch.distributed.get_backend", return_value="gloo")  # Mock get_backend
     @patch("tplr.neurons.outer_step")
@@ -356,8 +358,8 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         mock_broadcast.assert_called()
         mock_barrier.assert_called()
 
-    @patch("torch.distributed.barrier")
-    @patch("torch.distributed.broadcast")
+    @patch("tplr.distributed.dist_helper.safe_barrier")
+    @patch("tplr.distributed.dist_helper.broadcast")
     @patch("torch.distributed.is_initialized", return_value=True)
     @patch("torch.distributed.get_backend", return_value="gloo")  # Mock get_backend
     @patch("tplr.neurons.outer_step")
@@ -391,8 +393,8 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         mock_broadcast.assert_called()
         mock_barrier.assert_called()
 
-    @patch("torch.distributed.barrier")
-    @patch("torch.distributed.broadcast")
+    @patch("tplr.distributed.dist_helper.safe_barrier")
+    @patch("tplr.distributed.dist_helper.broadcast")
     @patch("torch.distributed.is_initialized", return_value=True)
     @patch("torch.distributed.get_backend", return_value="gloo")  # Mock get_backend
     @patch("tplr.neurons.outer_step")
@@ -420,8 +422,8 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         mock_broadcast.assert_called()
         # mock_barrier.assert_called() # Barrier is skipped in this scenario
 
-    @patch("torch.distributed.barrier")
-    @patch("torch.distributed.broadcast")
+    @patch("tplr.distributed.dist_helper.safe_barrier")
+    @patch("tplr.distributed.dist_helper.broadcast")
     @patch("torch.distributed.is_initialized", return_value=True)
     @patch("torch.distributed.get_backend", return_value="gloo")  # Mock get_backend
     @patch("tplr.neurons.outer_step")
@@ -473,8 +475,8 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         self.assertEqual(mock_broadcast.call_count, 3)  # One for each window iteration
         mock_barrier.assert_called()
 
-    @patch("torch.distributed.barrier")
-    @patch("torch.distributed.broadcast")
+    @patch("tplr.distributed.dist_helper.safe_barrier")
+    @patch("tplr.distributed.dist_helper.broadcast")
     @patch("torch.distributed.is_initialized", return_value=True)
     @patch("torch.distributed.get_backend", return_value="gloo")  # Mock get_backend
     @patch("tplr.neurons.outer_step")
@@ -517,8 +519,8 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         self.assertEqual(mock_broadcast.call_count, 4)  # One for each window iteration
         mock_barrier.assert_called()
 
-    @patch("torch.distributed.barrier")
-    @patch("torch.distributed.broadcast")
+    @patch("tplr.distributed.dist_helper.safe_barrier")
+    @patch("tplr.distributed.dist_helper.broadcast")
     @patch("torch.distributed.is_initialized", return_value=True)
     @patch("torch.distributed.get_backend", return_value="gloo")  # Mock get_backend
     @patch("tplr.neurons.outer_step")

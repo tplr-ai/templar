@@ -776,6 +776,11 @@ class Validator(BaseNode, Trainer):
 
         # Handle start_window similar to miner - only master rank checks and posts
         if self.is_master:
+            peer_start = tplr.T()
+            await tplr.neurons.update_peers(
+                instance=self, window=self.current_window, peer_start=peer_start
+            )
+
             # Only post start window if you are the highest stake validator
             if self.uid == self.comms.metagraph.S.argmax().item():
                 # Check if an existing start window already exists
@@ -818,7 +823,8 @@ class Validator(BaseNode, Trainer):
                 "Could not find a valid start window. This should not be possible."
             )
 
-        self.global_step = self.current_window - self.start_window
+        # global_step tracks actual outer steps performed (starts at 0)
+        self.global_step = 0
         tplr.logger.info(
             f"Using start_window: {self.start_window}, global_step: {self.global_step}"
         )
@@ -858,6 +864,7 @@ class Validator(BaseNode, Trainer):
             # 2. Increment sync window and update peer lists
             window_start = tplr.T()
 
+            # Check if we need to swap dataset based on actual outer steps taken
             if self.global_step > 0 and self.global_step % self.windows_per_shard == 0:
                 tplr.logger.info(f"Swapping dataset at window {self.current_window}")
                 await self.dataset_manager.swap_datasets()
@@ -867,7 +874,7 @@ class Validator(BaseNode, Trainer):
             if self.is_master:
                 tplr.log_with_context(
                     level="info",
-                    message=f"Sync Window: {self.sync_window}, Global step: {self.global_step}",
+                    message=f"Sync Window: {self.sync_window}, Outer Steps Taken: {self.global_step}",
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
@@ -1045,7 +1052,6 @@ class Validator(BaseNode, Trainer):
             skip_window = bool(skip_tensor.item())
 
             if skip_window:
-                self.global_step += 1
                 continue
 
             # --------------------------------------------------------------+
@@ -1161,7 +1167,6 @@ class Validator(BaseNode, Trainer):
             has_peers = has_peers_tensor.item()
 
             if not has_peers:
-                self.global_step += 1
                 continue
 
             # Barrier before evaluation starts (soft)
@@ -1831,6 +1836,9 @@ class Validator(BaseNode, Trainer):
             # 14. Now, merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
             update_start = tplr.T()
+
+            # Only perform outer step if we have gradients to apply
+            # We already checked skip_window above, so we know we should update
             self.outer_optimizer.zero_grad()
             self.model.zero_grad()
 
@@ -1849,6 +1857,8 @@ class Validator(BaseNode, Trainer):
                 wandb_run=self.wandb if self.is_master else None,
                 global_step=self.global_step,
             )
+            self.global_step += 1  # Increment only when we actually do an outer step
+            tplr.logger.info(f"Applied outer step #{self.global_step}")
 
             # Add barrier after model update to ensure all ranks complete the update
             tplr.log_with_context(
@@ -2169,6 +2179,7 @@ class Validator(BaseNode, Trainer):
                     model=self.model,
                     window=self.sync_window,
                     sync_window=self.sync_window,
+                    global_step=self.global_step,
                     topology="FSDP",
                 )
 
@@ -2183,8 +2194,7 @@ class Validator(BaseNode, Trainer):
             # Synchronize all ranks before moving to next window
             dist_helper.safe_barrier("pre_next_window", self.local_rank)
 
-            # 19. Increment global step
-            self.global_step += 1
+            # 19. Global step is now incremented only in the outer_step block
 
             torch.cuda.empty_cache()
 
@@ -3171,18 +3181,26 @@ class Validator(BaseNode, Trainer):
         # Proceed to load checkpoint
         #   • rank-0 (or single-GPU run) downloads & catches-up
         #   • remaining ranks receive state via NCCL broadcast
-        ckpt_sync_win = await self.ckpt.download_and_load(
+        res = await self.ckpt.download_and_load(
             model=self.model,
             window=None,  # latest
             shared_fs=True,
             process_group=None,
             prefer_highest_staked=True,
         )
-        ckpt_ok = ckpt_sync_win is not None
+        if res is not None:
+            ckpt_ok = True
+            ckpt_sync_win, ckpt_global_step = res
+        else:
+            ckpt_ok = False
+            ckpt_sync_win, ckpt_global_step = 0, self.global_step
 
         assert self.start_window is not None
         if ckpt_ok:
-            tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
+            self.global_step = ckpt_global_step  # Restore global_step from checkpoint
+            tplr.logger.info(
+                f"Checkpoint loaded (sync_window={ckpt_sync_win}, global_step={ckpt_global_step})"
+            )
         else:
             tplr.logger.info("No checkpoint found – starting from scratch")
 

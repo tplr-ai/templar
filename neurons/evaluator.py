@@ -75,17 +75,16 @@ def _cuda_gc(label: str = "") -> None:
 @contextlib.contextmanager
 def pause_ddp_for_lm_eval(tag: str):
     """
-    Context manager that:
-      1) barriers, destroys PG,
-      2) lets rank0 run lm-eval (others wait on sentinel),
-      3) re-inits PG, barriers, cleans sentinel.
+    Context manager that synchronizes ranks for lm-eval execution.
+
+    1) All ranks barrier on entry
+    2) Rank 0 runs lm-eval while others wait on sentinel file
+    3) All ranks barrier on exit after cleanup
     """
     if dist_helper.is_distributed():
-        # Barrier before destroying process group
         dist_helper.safe_barrier(
             tag=f"pause_ddp_enter_{tag}", local_rank=dist_helper.local_rank
         )
-        dist_helper.destroy_process_group()
 
     sentinel = Path(f"/tmp/tplr_eval_done_{tag}")
     try:
@@ -95,15 +94,6 @@ def pause_ddp_for_lm_eval(tag: str):
             while not sentinel.exists():
                 time.sleep(0.25)
 
-        # Re-initialize process group
-        if not dist_helper.is_distributed():
-            dist_helper.init_process_group()
-            if dist_helper.is_master:
-                tplr.logger.info(
-                    "[Master] Re-initialized distributed process group after lm-eval"
-                )
-
-        # Barrier after re-init
         if dist_helper.is_distributed():
             dist_helper.safe_barrier(
                 tag=f"pause_ddp_exit_{tag}", local_rank=dist_helper.local_rank
@@ -182,17 +172,32 @@ class ModelCache:
 
     def cleanup(self, keep_latest: int = 2):
         """Remove old cached models."""
-        models = sorted(
-            [d for d in self.base_dir.iterdir() if d.is_dir()],
-            key=lambda x: x.stat().st_mtime,
-        )
+        # Get all window directories and extract window numbers
+        model_dirs = []
+        for d in self.base_dir.iterdir():
+            if d.is_dir() and d.name.startswith("window_"):
+                try:
+                    window_num = int(d.name.split("_")[1])
+                    model_dirs.append((window_num, d))
+                except (IndexError, ValueError):
+                    # Skip directories that don't match expected format
+                    continue
 
-        for old_model in models[:-keep_latest]:
-            try:
-                shutil.rmtree(old_model)
-                tplr.logger.info(f"Removed old model cache: {old_model}")
-            except Exception as e:
-                tplr.logger.warning(f"Failed to remove {old_model}: {e}")
+        # Sort by window number (ascending)
+        model_dirs.sort(key=lambda x: x[0])
+
+        # Remove all but the latest keep_latest models
+        if len(model_dirs) > keep_latest:
+            for _, old_model in model_dirs[:-keep_latest]:
+                try:
+                    shutil.rmtree(old_model)
+                    tplr.logger.info(f"Removed old model cache: {old_model}")
+                except Exception as e:
+                    tplr.logger.warning(f"Failed to remove {old_model}: {e}")
+        else:
+            tplr.logger.info(
+                f"Model cache has {len(model_dirs)} models, keeping all (threshold: {keep_latest})"
+            )
 
 
 class Evaluator:
@@ -647,7 +652,6 @@ class Evaluator:
                                     f"evaluator/benchmark/{task_name}/{used_metric}": metric_value,
                                 },
                                 step=global_step,
-                                commit=True,
                             )
                         else:
                             tplr.logger.warning(
@@ -666,7 +670,7 @@ class Evaluator:
                             "global_step": global_step,
                         },
                     )
-                    # Log summary to wandb
+                    # Log summary to wandb - commit to push metrics immediately
                     self.wandb.log(
                         {
                             "evaluator/benchmark/num_tasks": len(results),
@@ -854,7 +858,6 @@ class Evaluator:
                     "evaluator/custom_eval/total_bytes": total_bytes,
                 },
                 step=global_step,
-                commit=True,
             )
 
         return perplexity, average_loss
@@ -977,13 +980,14 @@ class Evaluator:
                 f"[Master] Window {window} evaluation complete. Total evaluated: {len(self.evaluated_windows)}"
             )
 
-        # Cleanup old models
+        # Cleanup old models and checkpoints
         if len(self.evaluated_windows) > 2:
             if self.is_master:
                 tplr.logger.info(
-                    f"[Master] Cleaning up old model caches (keeping latest 2)"
+                    f"[Master] Cleaning up old model caches and checkpoints (keeping latest 1)"
                 )
-            self.model_cache.cleanup(keep_latest=2)
+            self.model_cache.cleanup(keep_latest=1)
+            self.ckpt.cleanup_local_checkpoints(keep_latest=1)
         return True
 
     async def run(self):

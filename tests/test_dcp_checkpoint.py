@@ -390,3 +390,89 @@ async def test_download_and_load_uses_sidecar(
     )
     assert got == (123, 456)  # Now returns (window, global_step)
     assert called["window"] == 123
+
+
+@pytest.mark.asyncio
+async def test_cleanup_local_checkpoints(tmp_path: Path, monkeypatch):
+    """Test that cleanup_local_checkpoints removes old checkpoints correctly."""
+
+    # Mock _rank to return 0 (master)
+    import src.tplr.dcp_checkpoint as dcp_module
+
+    monkeypatch.setattr(dcp_module, "_rank", lambda: 0)
+
+    # Create test checkpoint directories
+    version = "test_version"
+    checkpoint_base = tmp_path / "checkpoints" / version
+    checkpoint_base.mkdir(parents=True)
+
+    # Create multiple window directories
+    windows = [100, 200, 300, 400, 500]
+    for window in windows:
+        window_dir = checkpoint_base / str(window)
+        window_dir.mkdir()
+        # Add a dummy file to make it look like a real checkpoint
+        (window_dir / "checkpoint.pt").touch()
+
+    # Also create a non-window directory that should be ignored
+    (checkpoint_base / "not_a_window").mkdir()
+    (checkpoint_base / "not_a_window" / "file.txt").touch()
+
+    # Setup DCPCheckpointer
+    comms = FakeComms(
+        own_bucket=FakeBucket("test-bucket"),
+        repo_root=tmp_path,
+    )
+    ckpt = tplr.DCPCheckpointer(comms, uid=1, version=version, repo_root=tmp_path)
+
+    # Test keeping 2 latest checkpoints
+    ckpt.cleanup_local_checkpoints(keep_latest=2)
+
+    # Check that only the latest 2 windows remain (400, 500)
+    remaining = sorted(
+        [
+            int(d.name)
+            for d in checkpoint_base.iterdir()
+            if d.is_dir() and d.name.isdigit()
+        ]
+    )
+    assert remaining == [400, 500], f"Expected [400, 500] but got {remaining}"
+
+    # Check that old windows were removed
+    assert not (checkpoint_base / "100").exists()
+    assert not (checkpoint_base / "200").exists()
+    assert not (checkpoint_base / "300").exists()
+
+    # Check that non-window directory was not touched
+    assert (checkpoint_base / "not_a_window").exists()
+
+    # Test keeping 1 latest checkpoint
+    ckpt.cleanup_local_checkpoints(keep_latest=1)
+
+    remaining = sorted(
+        [
+            int(d.name)
+            for d in checkpoint_base.iterdir()
+            if d.is_dir() and d.name.isdigit()
+        ]
+    )
+    assert remaining == [500], f"Expected [500] but got {remaining}"
+
+    # Test with no checkpoints to clean (only 1 exists, keep_latest=2)
+    ckpt.cleanup_local_checkpoints(keep_latest=2)
+
+    remaining = sorted(
+        [
+            int(d.name)
+            for d in checkpoint_base.iterdir()
+            if d.is_dir() and d.name.isdigit()
+        ]
+    )
+    assert remaining == [500], f"Expected [500] but got {remaining}"
+
+    # Test with non-existent checkpoint directory
+    ckpt_nonexistent = tplr.DCPCheckpointer(
+        comms, uid=1, version="nonexistent", repo_root=tmp_path
+    )
+    # Should not raise, just return early
+    ckpt_nonexistent.cleanup_local_checkpoints(keep_latest=1)

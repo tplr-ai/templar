@@ -1,0 +1,55 @@
+#!/bin/bash
+set -euo pipefail
+
+DISCORD_WEBHOOK="{{ discord_webhook_url }}"
+DISCORD_NOTIFIER="{{ monitoring_base_path }}/discord_notifier.py"
+LOG_FILE="{{ monitoring_base_path }}/health_check.log"
+
+NODES=({% for i in range(subtensor_replicas | int) %}"localhost:{{ subtensor_rpc_port_start | int + i }}"{% if not loop.last %} {% endif %}{% endfor %})
+
+{% raw %}
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"; }
+
+send_discord_alert() {
+    local severity="$1" title="$2" message="$3" fields="$4"
+    if [[ -n "$DISCORD_WEBHOOK" ]] && [[ -f "$DISCORD_NOTIFIER" ]]; then
+{% endraw %}        {{ monitoring_base_path }}/venv/bin/python "$DISCORD_NOTIFIER" --webhook-url "$DISCORD_WEBHOOK" --severity "$severity" --title "$title" --message "$message" --fields "$fields" 2>/dev/null || true{% raw %}
+    fi
+}
+
+check_rpc_endpoint() {
+    curl -s --connect-timeout 10 -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"system_health","params":[],"id":1}' "http://$1" 2>/dev/null | grep -q '"result"'
+}
+
+main() {
+    log "Starting Subtensor health check..."
+    local healthy_nodes=0 total_nodes=${#NODES[@]} failed_nodes=()
+    
+    for node in "${NODES[@]}"; do
+        echo -n "Checking $node... "
+        if check_rpc_endpoint "$node"; then
+            echo -e "${GREEN}HEALTHY${NC}"; log "Node $node: HEALTHY"; ((healthy_nodes++))
+        else
+            echo -e "${RED}FAILED${NC}"; log "Node $node: FAILED"; failed_nodes+=("$node")
+        fi
+    done
+    
+    echo; log "Health check completed: $healthy_nodes/$total_nodes nodes healthy"
+    
+    if [[ $healthy_nodes -eq 0 ]]; then
+        send_discord_alert "critical" "All Subtensor Nodes Down" "ALL NODES UNREACHABLE!" '{"Total":"'$total_nodes'","Healthy":"0"}'
+    elif [[ ${#failed_nodes[@]} -gt 0 ]]; then
+        local failed_list=$(IFS=','; echo "${failed_nodes[*]}")
+        send_discord_alert "warning" "Subtensor Node Issues" "Some nodes have issues" '{"Failed":"'$failed_list'","Healthy":"'$healthy_nodes'/'$total_nodes'"}'
+    fi
+{% endraw %}    
+    echo "Monitoring: Prometheus http://{{ ansible_host }}:{{ prometheus_port }} | AlertManager http://{{ ansible_host }}:{{ alertmanager_port }}"{% raw %}
+    [[ ${#failed_nodes[@]} -gt 0 ]] && exit 1 || exit 0
+}
+
+mkdir -p "$(dirname "$LOG_FILE")"; main "$@"
+{% endraw %}

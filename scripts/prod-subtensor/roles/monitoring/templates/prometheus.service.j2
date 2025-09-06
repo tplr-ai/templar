@@ -1,0 +1,26 @@
+[Unit]
+Description=Prometheus Server
+Documentation=https://prometheus.io/docs/
+After=network-online.target
+
+[Service]
+Type=simple
+User=monitoring
+Group=monitoring
+ExecStart=/usr/local/bin/prometheus \
+  --config.file={{ monitoring_config_path }}/prometheus.yml \
+  --storage.tsdb.path={{ monitoring_data_path }}/prometheus \
+  --storage.tsdb.retention.time={{ prometheus_retention }} \
+  --web.console.libraries=/usr/share/prometheus/console_libraries \
+  --web.console.templates=/usr/share/prometheus/consoles \
+  --web.listen-address=0.0.0.0:{{ prometheus_port }} \
+  --web.external-url=http://{{ ansible_host }}:{{ prometheus_port }}/ \
+  --web.enable-lifecycle \
+  --log.level=info
+
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

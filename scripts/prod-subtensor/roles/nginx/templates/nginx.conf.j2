@@ -1,0 +1,67 @@
+user {{ nginx_user }};
+worker_processes {{ nginx_worker_processes }};
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+    worker_connections {{ nginx_worker_connections }};
+    multi_accept on;
+    use epoll;
+}
+
+http {
+    sendfile {{ nginx_sendfile | ternary('on', 'off') }};
+    tcp_nopush {{ nginx_tcp_nopush | ternary('on', 'off') }};
+    tcp_nodelay {{ nginx_tcp_nodelay | ternary('on', 'off') }};
+    keepalive_timeout {{ nginx_keepalive_timeout }};
+    types_hash_max_size {{ nginx_types_hash_max_size }};
+    server_tokens {{ nginx_server_tokens | ternary('on', 'off') }};
+    server_names_hash_bucket_size {{ nginx_server_names_hash_bucket_size }};
+    client_max_body_size {{ nginx_client_max_body_size }};
+
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    log_format main {{ nginx_log_format | to_json }};
+    access_log /var/log/nginx/access.log main;
+    error_log /var/log/nginx/error.log warn;
+
+    gzip on;
+    gzip_disable "msie6";
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_buffers 16 8k;
+    gzip_http_version 1.1;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+
+    client_body_timeout 15;
+    client_header_timeout 15;
+    send_timeout 60;
+    reset_timedout_connection on;
+
+    proxy_connect_timeout {{ nginx_proxy_connect_timeout }}s;
+    proxy_send_timeout {{ nginx_proxy_send_timeout }}s;
+    proxy_read_timeout {{ nginx_proxy_read_timeout }}s;
+    proxy_buffers {{ nginx_proxy_buffers }};
+
+    limit_req_zone $binary_remote_addr zone={{ nginx_rate_limit_zone }}:10m rate={{ nginx_rate_limit_requests }};
+    limit_conn_zone $binary_remote_addr zone=conn_limit_per_ip:10m;
+
+{% if nginx_ssl_enabled | default(true) %}
+    ssl_protocols {{ nginx_ssl_protocols }};
+    ssl_ciphers {{ nginx_ssl_ciphers }};
+    ssl_prefer_server_ciphers {{ nginx_ssl_prefer_server_ciphers | ternary('on', 'off') }};
+    ssl_session_cache {{ nginx_ssl_session_cache }};
+    ssl_session_timeout {{ nginx_ssl_session_timeout }};
+    ssl_dhparam /etc/nginx/ssl/dhparam.pem;
+{% endif %}
+
+    map $sent_http_content_type $security_headers {
+        ~*text/html "{{ nginx_security_headers | join('; ') }}";
+        default "";
+    }
+
+    include /etc/nginx/conf.d/*.conf;
+    include /etc/nginx/sites-enabled/*;
+}

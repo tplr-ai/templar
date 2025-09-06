@@ -1,0 +1,74 @@
+// Unattended-Upgrade::Origins-Pattern controls which packages are
+// upgraded by the unattended-upgrades script.
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Ubuntu,archive=${distro_codename}-security,label=Ubuntu";
+        "o=Ubuntu,a=${distro_codename}";
+        "o=Ubuntu,a=${distro_codename}-updates";
+        "o=Ubuntu,a=${distro_codename}-proposed";
+        "o=Ubuntu,a=${distro_codename}-backports";
+};
+
+// Python regular expressions, matching packages to exclude from upgrading
+Unattended-Upgrade::Package-Blacklist {
+        // Docker packages - manage manually
+        "docker-ce";
+        "docker-ce-cli";
+        "containerd.io";
+        "docker-compose-plugin";
+        
+        // Kernel packages - manage manually for production
+        "linux-image.*";
+        "linux-headers.*";
+        "linux-modules.*";
+        
+        // NGINX - manage manually
+        "nginx";
+        "nginx-common";
+        "nginx-core";
+};
+
+// Split the upgrade into the smallest possible chunks so that
+// they can be interrupted with SIGTERM.
+Unattended-Upgrade::MinimalSteps "true";
+
+// Send email to this address for problems or packages upgrades
+// If empty or unset then no email is sent, make sure that you
+// have a working mail setup on your system.
+Unattended-Upgrade::Mail "root";
+
+// Set this value to "true" to get emails only on errors.
+Unattended-Upgrade::MailOnlyOnError "true";
+
+// Remove unused automatically installed kernel-related packages
+// (kernel images, kernel headers and kernel version locked tools).
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+
+// Do automatic removal of newly unused dependencies after the upgrade
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+
+// Do automatic removal of unused packages after the upgrade
+// (equivalent to apt autoremove)
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+
+// Automatically reboot *WITHOUT CONFIRMATION* if
+//  the file /var/run/reboot-required is found after the upgrade
+Unattended-Upgrade::Automatic-Reboot "false";
+
+// Automatically reboot even if there are users currently logged in
+// when Unattended-Upgrade::Automatic-Reboot is set to true
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+
+// If automatic reboot is enabled and needed, reboot at the specific
+// time instead of immediately
+//  Default: "now"
+Unattended-Upgrade::Automatic-Reboot-Time "02:00";
+
+// Use apt bandwidth limit feature, this example limits the download
+// speed to 70kb/sec
+//Unattended-Upgrade::Acquire::http::Dl-Limit "70";
+
+// Enable logging to syslog. Default is False
+Unattended-Upgrade::SyslogEnable "true";
+
+// Specify syslog facility. Default is daemon
+Unattended-Upgrade::SyslogFacility "daemon";

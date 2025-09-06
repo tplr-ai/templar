@@ -652,7 +652,6 @@ class Evaluator:
                                     f"evaluator/benchmark/{task_name}/{used_metric}": metric_value,
                                 },
                                 step=global_step,
-                                commit=True,
                             )
                         else:
                             tplr.logger.warning(
@@ -671,7 +670,7 @@ class Evaluator:
                             "global_step": global_step,
                         },
                     )
-                    # Log summary to wandb
+                    # Log summary to wandb - commit to push metrics immediately
                     self.wandb.log(
                         {
                             "evaluator/benchmark/num_tasks": len(results),
@@ -859,7 +858,6 @@ class Evaluator:
                     "evaluator/custom_eval/total_bytes": total_bytes,
                 },
                 step=global_step,
-                commit=True,
             )
 
         return perplexity, average_loss

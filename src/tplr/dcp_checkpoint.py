@@ -20,6 +20,7 @@
 import asyncio
 import json
 import re
+import shutil
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -122,7 +123,14 @@ class DCPCheckpointer:
     • Download + DCP load (reshards to miner topology)
     """
 
-    def __init__(self, comms, *, uid: int, version: str, repo_root: str | Path = "."):
+    def __init__(
+        self,
+        comms: "tplr.Comms",
+        *,
+        uid: int,
+        version: str,
+        repo_root: str | Path = ".",
+    ):
         self.comms = comms
         self.uid = int(uid)
         self.version = version
@@ -225,6 +233,7 @@ class DCPCheckpointer:
         model,
         window: int,
         sync_window: int,
+        global_step: int,
         topology: str = "FSDP",
     ) -> "DCPCheckpointer.SaveHandle":
         """
@@ -246,6 +255,7 @@ class DCPCheckpointer:
                 "version": self.version,
                 "window": int(window),
                 "sync_window": int(sync_window),
+                "global_step": int(global_step),
                 "world_size_at_save": int(_world()),
                 "topology": topology,
                 "uid": self.uid,
@@ -583,6 +593,27 @@ class DCPCheckpointer:
         if r == 0:
             assigned.extend(meta_keys)  # rank‑0 also pulls metadata/JSON
 
+        # Debug logging: show file assignments
+        if r == 0:
+            tplr.logger.info(f"[DCP][download-dist] Total files found: {len(keys)}")
+            tplr.logger.info(
+                f"[DCP][download-dist] Data files: {[Path(k).name for k, _ in data_keys_sorted]}"
+            )
+            tplr.logger.info(
+                f"[DCP][download-dist] Meta files: {[Path(k).name for k, _ in meta_keys]}"
+            )
+
+            # Show assignment for each rank
+            for rank_i in range(world):
+                rank_assigned = [
+                    Path(pair[0]).name
+                    for i, pair in enumerate(data_keys_sorted)
+                    if i % world == rank_i
+                ]
+                tplr.logger.info(
+                    f"[DCP][download-dist] Rank {rank_i} assigned: {rank_assigned}"
+                )
+
         owned_bytes = sum(sz for _, sz in assigned if not _is_meta(Path(_).name))
         meta_bytes = sum(sz for _, sz in meta_keys) if r == 0 else 0
         tplr.logger.info(
@@ -600,14 +631,26 @@ class DCPCheckpointer:
                 )
                 continue
             t0 = time.perf_counter()
-            await self.comms.s3_get_object(
-                key=key, bucket=bucket, load_data=False, show_progress=False
-            )
-            dt = time.perf_counter() - t0
-            tplr.logger.debug(
-                f"[DCP][download-dist] rank {r}/{world} ↓ {key} "
-                f"{_mb(sz):.2f} MiB in {dt:.2f}s ({_mb(sz) / dt if dt > 0 else 0:.2f} MiB/s)"
-            )
+            try:
+                await self.comms.s3_get_object(
+                    key=key, bucket=bucket, load_data=False, show_progress=True
+                )
+                dt = time.perf_counter() - t0
+                # Verify the file was actually downloaded
+                if not dst.exists():
+                    tplr.logger.error(
+                        f"[DCP][download-dist] rank {r}/{world} failed to download {key} - file missing after download"
+                    )
+                    raise FileNotFoundError(f"Failed to download {key}")
+                tplr.logger.debug(
+                    f"[DCP][download-dist] rank {r}/{world} ↓ {key} "
+                    f"{_mb(sz):.2f} MiB in {dt:.2f}s ({_mb(sz) / dt if dt > 0 else 0:.2f} MiB/s)"
+                )
+            except Exception as e:
+                tplr.logger.error(
+                    f"[DCP][download-dist] rank {r}/{world} error downloading {key}: {e}"
+                )
+                raise
 
         _barrier()  # all owners finished
 
@@ -618,23 +661,89 @@ class DCPCheckpointer:
             for key, sz in keys:
                 dst = self.repo_root / key
                 if not dst.exists():
+                    tplr.logger.warning(
+                        f"[DCP][download-dist] rank 0 mop-up: missing file {key}, downloading..."
+                    )
                     t0 = time.perf_counter()
-                    await self.comms.s3_get_object(
-                        key=key, bucket=bucket, load_data=False, show_progress=True
-                    )
-                    dt = time.perf_counter() - t0
-                    mop_files += 1
-                    mop_bytes += sz
-                    tplr.logger.debug(
-                        f"[DCP][download-dist] rank 0 mop-up ↓ {key} "
-                        f"{_mb(sz):.2f} MiB in {dt:.2f}s ({_mb(sz) / dt if dt > 0 else 0:.2f} MiB/s)"
-                    )
+                    try:
+                        await self.comms.s3_get_object(
+                            key=key, bucket=bucket, load_data=False, show_progress=True
+                        )
+                        dt = time.perf_counter() - t0
+                        mop_files += 1
+                        mop_bytes += sz
+                        tplr.logger.info(
+                            f"[DCP][download-dist] rank 0 mop-up ↓ {key} "
+                            f"{_mb(sz):.2f} MiB in {dt:.2f}s ({_mb(sz) / dt if dt > 0 else 0:.2f} MiB/s)"
+                        )
+                        # Verify the file was actually downloaded
+                        if not dst.exists():
+                            tplr.logger.error(
+                                f"[DCP][download-dist] mop-up failed: {key} still missing after download"
+                            )
+                            raise FileNotFoundError(f"Failed to download {key}")
+                    except Exception as e:
+                        tplr.logger.error(
+                            f"[DCP][download-dist] mop-up error for {key}: {e}"
+                        )
+                        raise
             tplr.logger.info(
                 f"[DCP][download-dist] rank 0 mop-up completed | files={mop_files}, "
                 f"bytes≈{mop_bytes} ({_mb(mop_bytes):.2f} MiB)"
             )
 
         _barrier()  # ensure folder is complete for all ranks
+
+        # Final validation: ensure all expected files exist
+        if r == 0:
+            missing_files = []
+            for key, sz in keys:
+                dst = self.repo_root / key
+                if not dst.exists():
+                    missing_files.append(key)
+
+            if missing_files:
+                tplr.logger.error(
+                    f"[DCP][download-dist] validation failed: missing files {missing_files}"
+                )
+                raise FileNotFoundError(
+                    f"Download incomplete: missing files {missing_files}"
+                )
+            else:
+                tplr.logger.info(
+                    f"[DCP][download-dist] validation passed: all {len(keys)} files present"
+                )
+
+                # Additional check for world size mismatch issues
+                data_files = [k for k, _ in keys if not _is_meta(Path(k).name)]
+                expected_pattern = []
+                for i in range(world):
+                    expected_pattern.append(f"__{i}_0.distcp")
+
+                actual_files = [Path(k).name for k in data_files]
+
+                # Check if we have the sequential pattern expected for current world size
+                missing_expected = [
+                    f for f in expected_pattern if f not in actual_files
+                ]
+                if missing_expected:
+                    tplr.logger.warning(
+                        f"[DCP][download-dist] Potential world size mismatch detected!"
+                    )
+                    tplr.logger.warning(
+                        f"[DCP][download-dist] Expected for world_size={world}: {expected_pattern}"
+                    )
+                    tplr.logger.warning(
+                        f"[DCP][download-dist] Actually available: {actual_files}"
+                    )
+                    tplr.logger.warning(
+                        f"[DCP][download-dist] Missing: {missing_expected}"
+                    )
+                    tplr.logger.warning(
+                        f"[DCP][download-dist] This checkpoint will require resharding during load."
+                    )
+
+        _barrier()  # ensure validation is complete on all ranks
 
         dt_all = time.perf_counter() - t_all
         total_assigned = sum(sz for _, sz in assigned) + (meta_bytes if r == 0 else 0)
@@ -651,8 +760,115 @@ class DCPCheckpointer:
     ) -> None:
         layout = Layout(self.version, window)
         ckpt_dir = self._local_dir(layout)
+
+        # Pre-load validation: check that checkpoint directory and critical files exist
+        if not ckpt_dir.exists():
+            raise FileNotFoundError(f"Checkpoint directory does not exist: {ckpt_dir}")
+
+        # List all files to debug what's actually present
+        all_files = list(ckpt_dir.glob("*"))
+        distcp_files = [f for f in all_files if f.name.endswith(".distcp")]
+
+        tplr.logger.info(f"[DCP][load_local] Loading from: {ckpt_dir}")
+        tplr.logger.info(f"[DCP][load_local] Directory contains {len(all_files)} files")
+        tplr.logger.info(
+            f"[DCP][load_local] .distcp files: {[f.name for f in distcp_files]}"
+        )
+
+        # Check for metadata file
+        metadata_file = ckpt_dir / ".metadata"
+        if not metadata_file.exists():
+            raise FileNotFoundError(f"Metadata file missing: {metadata_file}")
+
+        # Read and log checkpoint metadata to understand save vs load world size mismatch
+        try:
+            import json
+
+            metadata_content = metadata_file.read_text()
+            tplr.logger.info(
+                f"[DCP][load_local] Metadata content preview: {metadata_content[:500]}..."
+            )
+        except Exception as e:
+            tplr.logger.warning(f"[DCP][load_local] Could not read metadata: {e}")
+
+        # Check sidecar metadata for world size info
+        try:
+            sidecar_file = ckpt_dir / "extra_metadata.json"
+            if sidecar_file.exists():
+                sidecar_content = json.loads(sidecar_file.read_text())
+                saved_world_size = sidecar_content.get("world_size_at_save", "unknown")
+                current_world_size = _world()
+                tplr.logger.info(
+                    f"[DCP][load_local] Checkpoint saved with world_size={saved_world_size}, loading with world_size={current_world_size}"
+                )
+
+                if (
+                    saved_world_size != current_world_size
+                    and saved_world_size != "unknown"
+                ):
+                    tplr.logger.warning(
+                        f"[DCP][load_local] World size mismatch! This explains why __1_0.distcp is missing."
+                    )
+                    tplr.logger.info(
+                        f"[DCP][load_local] Expected files for current world size: {['__' + str(i) + '_0.distcp' for i in range(current_world_size)]}"
+                    )
+                    tplr.logger.info(
+                        f"[DCP][load_local] Available files: {[f.name for f in distcp_files]}"
+                    )
+        except Exception as e:
+            tplr.logger.warning(
+                f"[DCP][load_local] Could not read sidecar metadata: {e}"
+            )
+
+        # Ensure we have distributed checkpoint files
+        if not distcp_files:
+            raise FileNotFoundError(f"No .distcp files found in {ckpt_dir}")
+
         state = {"app": AppState(model)}
-        load(state_dict=state, checkpoint_id=str(ckpt_dir), process_group=process_group)
+        tplr.logger.info(f"[DCP][load_local] About to call torch load on {ckpt_dir}")
+
+        # Handle world size mismatch by using resharding
+        try:
+            # First try with the provided process group (normal case)
+            load(
+                state_dict=state,
+                checkpoint_id=str(ckpt_dir),
+                process_group=process_group,
+            )
+            tplr.logger.info(
+                f"[DCP][load_local] Successfully loaded checkpoint with current process group"
+            )
+        except Exception as e:
+            if "FileNotFoundError" in str(e) and "__1_0.distcp" in str(e):
+                tplr.logger.warning(
+                    f"[DCP][load_local] Load failed due to missing file (world size mismatch): {e}"
+                )
+                tplr.logger.info(
+                    f"[DCP][load_local] Attempting to load with automatic resharding (no process group)"
+                )
+
+                try:
+                    # Try without process group to enable automatic resharding
+                    load(
+                        state_dict=state,
+                        checkpoint_id=str(ckpt_dir),
+                        process_group=None,
+                    )
+                    tplr.logger.info(
+                        f"[DCP][load_local] Successfully loaded checkpoint with automatic resharding"
+                    )
+                except Exception as e2:
+                    tplr.logger.error(
+                        f"[DCP][load_local] Automatic resharding also failed: {e2}"
+                    )
+                    tplr.logger.error(f"[DCP][load_local] Original error: {e}")
+                    raise e2
+            else:
+                # Different error, re-raise
+                tplr.logger.error(
+                    f"[DCP][load_local] Load failed with different error: {e}"
+                )
+                raise e
 
     async def download_and_load(
         self,
@@ -662,19 +878,164 @@ class DCPCheckpointer:
         shared_fs: bool = True,
         process_group: dist.ProcessGroup | None = None,
         prefer_highest_staked: bool = True,
-    ) -> int | None:
-        local_dir = await (
-            self.download_distributed(
+    ) -> tuple[int, int] | None:
+        local_dir = None
+
+        if shared_fs:
+            try:
+                tplr.logger.info("[DCP] Attempting distributed download...")
+                local_dir = await self.download_distributed(
+                    window=window, prefer_highest_staked=prefer_highest_staked
+                )
+            except Exception as e:
+                tplr.logger.warning(f"[DCP] Distributed download failed: {e}")
+                tplr.logger.info("[DCP] Falling back to download_all...")
+                try:
+                    local_dir = await self.download_all(
+                        window=window, prefer_highest_staked=prefer_highest_staked
+                    )
+                except Exception as e2:
+                    tplr.logger.error(
+                        f"[DCP] Both download methods failed. Distributed: {e}, All: {e2}"
+                    )
+                    raise e2
+        else:
+            local_dir = await self.download_all(
                 window=window, prefer_highest_staked=prefer_highest_staked
             )
-            if shared_fs
-            else self.download_all(
-                window=window, prefer_highest_staked=prefer_highest_staked
-            )
-        )
+
         if local_dir is None:
             return None
+
+        # Final validation before loading - ensure all critical files exist
+        layout = Layout(self.version, int(window) if window else 0)
+        expected_files = [".metadata", "extra_metadata.json"]
+
+        # List all files in the checkpoint directory to verify completeness
+        checkpoint_files = list(local_dir.glob("*"))
+        distcp_files = [f for f in checkpoint_files if f.name.endswith(".distcp")]
+
+        tplr.logger.info(
+            f"[DCP] Checkpoint directory contains {len(checkpoint_files)} total files"
+        )
+        tplr.logger.info(
+            f"[DCP] Found {len(distcp_files)} .distcp files: {[f.name for f in distcp_files]}"
+        )
+
+        # Check for critical files
+        missing_critical = []
+        for fname in expected_files:
+            if not (local_dir / fname).exists():
+                missing_critical.append(fname)
+
+        if missing_critical:
+            tplr.logger.error(
+                f"[DCP] Missing critical files before load: {missing_critical}"
+            )
+            raise FileNotFoundError(
+                f"Critical checkpoint files missing: {missing_critical}"
+            )
+
+        # Ensure we have at least some .distcp files
+        if not distcp_files:
+            tplr.logger.error("[DCP] No .distcp files found in checkpoint directory")
+            raise FileNotFoundError("No .distcp files found in checkpoint")
+
         sidecar = json.loads((local_dir / "extra_metadata.json").read_text())
         w = int(sidecar["window"])
+        global_step = int(sidecar.get("global_step", -1))
+
+        tplr.logger.info(
+            f"[DCP] About to load checkpoint: window={w}, global_step={global_step}"
+        )
         self.load_local(model=model, window=w, process_group=process_group)
-        return w
+        return w, global_step
+
+    async def check_checkpoint_exists(
+        self, *, window: int, prefer_highest_staked: bool = True
+    ) -> bool:
+        """Check if a checkpoint exists without downloading it.
+
+        Args:
+            window: Window number to check
+            prefer_highest_staked: Whether to check highest-staked validator's bucket first
+
+        Returns:
+            True if checkpoint exists and appears complete, False otherwise
+        """
+        try:
+            bucket = await self._choose_read_bucket(
+                prefer_highest_staked=prefer_highest_staked
+            )
+            s3 = await self.comms._get_s3_client(bucket)
+
+            # Check if the window directory exists with essential files
+            prefix = f"checkpoints/{self.version}/{window}/"
+
+            resp = await s3.list_objects_v2(
+                Bucket=bucket.name,
+                Prefix=prefix,
+                MaxKeys=10,  # Just check for a few files
+            )
+
+            objects = resp.get("Contents", [])
+            if not objects:
+                return False
+
+            # Check for essential files
+            has_metadata = any(".metadata" in obj.get("Key", "") for obj in objects)
+            has_shards = any("__0_0.distcp" in obj.get("Key", "") for obj in objects)
+            has_sidecar = any(
+                "extra_metadata.json" in obj.get("Key", "") for obj in objects
+            )
+
+            return has_metadata and has_shards and has_sidecar
+
+        except Exception:
+            return False
+
+    def cleanup_local_checkpoints(self, keep_latest: int = 1) -> None:
+        """
+        Remove old local checkpoint directories, keeping only the latest N windows.
+
+        Args:
+            keep_latest: Number of latest checkpoints to keep (default: 1)
+        """
+        checkpoint_base = self.repo_root / "checkpoints" / self.version
+
+        if not checkpoint_base.exists():
+            return
+
+        # Get all window directories and extract window numbers
+        window_dirs = []
+        for d in checkpoint_base.iterdir():
+            if d.is_dir() and d.name.isdigit():
+                try:
+                    window_num = int(d.name)
+                    window_dirs.append((window_num, d))
+                except ValueError:
+                    continue
+
+        # Sort by window number (ascending)
+        window_dirs.sort(key=lambda x: x[0])
+
+        # Remove all but the latest keep_latest checkpoints
+        if len(window_dirs) > keep_latest:
+            for _, old_checkpoint in window_dirs[:-keep_latest]:
+                try:
+                    shutil.rmtree(old_checkpoint)
+                    if _rank() == 0:
+                        tplr.logger.info(
+                            f"[DCP] Removed old checkpoint: {old_checkpoint}"
+                        )
+                except Exception as e:
+                    if _rank() == 0:
+                        tplr.logger.warning(
+                            f"[DCP] Failed to remove {old_checkpoint}: {e}"
+                        )
+        else:
+            if _rank() == 0:
+                tplr.logger.info(
+                    f"[DCP] Checkpoint cleanup: {len(window_dirs)} checkpoints present, "
+                    f"keeping all (threshold: {keep_latest})"
+                )

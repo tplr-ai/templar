@@ -75,17 +75,16 @@ def _cuda_gc(label: str = "") -> None:
 @contextlib.contextmanager
 def pause_ddp_for_lm_eval(tag: str):
     """
-    Context manager that:
-      1) barriers, destroys PG,
-      2) lets rank0 run lm-eval (others wait on sentinel),
-      3) re-inits PG, barriers, cleans sentinel.
+    Context manager that synchronizes ranks for lm-eval execution.
+
+    1) All ranks barrier on entry
+    2) Rank 0 runs lm-eval while others wait on sentinel file
+    3) All ranks barrier on exit after cleanup
     """
     if dist_helper.is_distributed():
-        # Barrier before destroying process group
         dist_helper.safe_barrier(
             tag=f"pause_ddp_enter_{tag}", local_rank=dist_helper.local_rank
         )
-        dist_helper.destroy_process_group()
 
     sentinel = Path(f"/tmp/tplr_eval_done_{tag}")
     try:
@@ -95,15 +94,6 @@ def pause_ddp_for_lm_eval(tag: str):
             while not sentinel.exists():
                 time.sleep(0.25)
 
-        # Re-initialize process group
-        if not dist_helper.is_distributed():
-            dist_helper.init_process_group()
-            if dist_helper.is_master:
-                tplr.logger.info(
-                    "[Master] Re-initialized distributed process group after lm-eval"
-                )
-
-        # Barrier after re-init
         if dist_helper.is_distributed():
             dist_helper.safe_barrier(
                 tag=f"pause_ddp_exit_{tag}", local_rank=dist_helper.local_rank

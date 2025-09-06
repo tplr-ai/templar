@@ -244,8 +244,7 @@ def outer_step(
       - Calls optimizer.step() per param (others have grad=None, so they're skipped).
       - Frees all temporaries and grad immediately after each step.
     """
-    bare_model = getattr(model, "module", model)
-    bare_model.train()
+    model.train()
 
     # Free any existing grads entirely (do not allocate zeros)
     optimizer.zero_grad(set_to_none=True)
@@ -276,7 +275,7 @@ def outer_step(
     min_median_norm = float("inf")
     max_median_norm = float("-inf")
 
-    for name, p in bare_model.named_parameters():
+    for name, p in model.named_parameters():
         # ---- master decides if this param has an update; others receive a flag ----
         has_update = 0
         payload = None
@@ -498,6 +497,177 @@ async def update_peers(instance: NeuronT, window: int, peer_start: float) -> Non
             f"is {instance.peers_update_window}"
         )
         tplr.logger.info(f"Not time to replace peers: {reason}")
+
+
+async def load_checkpoint_with_fallback(
+    instance: NeuronT,
+) -> tuple[bool, int, int, bool]:
+    """
+    Load checkpoint with fallback logic.
+
+    1. First try loading from current version
+    2. If not found, try bootstrap version if configured
+    3. Return checkpoint status and metadata
+
+    Returns:
+        tuple of (checkpoint_ok, checkpoint_window, global_step, from_bootstrap)
+    """
+    ckpt_ok = False
+    ckpt_sync_win = 0
+    ckpt_global_step = 0
+    from_bootstrap = False
+
+    # First check if current version has any checkpoints
+    latest_current_window = await instance.ckpt._discover_latest(
+        prefer_highest_staked=True
+    )
+
+    if latest_current_window is not None:
+        # Current version checkpoint exists, load it
+        res = await instance.ckpt.download_and_load(
+            model=instance.model,
+            window=latest_current_window,
+            shared_fs=True,
+            process_group=None,
+            prefer_highest_staked=True,
+        )
+        if res is not None:
+            ckpt_ok = True
+            ckpt_sync_win, ckpt_global_step = res
+            instance.model_initialized = True  # Model now has real weights
+            tplr.logger.info(
+                f"Loaded current version checkpoint (window={ckpt_sync_win}, "
+                f"global_step={ckpt_global_step})"
+            )
+
+    # If no current version checkpoint and bootstrap is configured, try that
+    if not ckpt_ok and instance.bootstrap_version:
+        tplr.logger.info(
+            f"No current version checkpoint found, trying bootstrap version "
+            f"{instance.bootstrap_version}"
+        )
+        # Try specific window if configured, otherwise latest
+        bootstrap_window = getattr(instance.hparams, "checkpoint_init_window", None)
+        bootstrap_ckpt = tplr.DCPCheckpointer(
+            instance.comms,
+            uid=instance.uid,
+            version=instance.bootstrap_version,
+            repo_root=".",
+        )
+
+        # If no specific window configured, discover latest in bootstrap version
+        if bootstrap_window is None:
+            bootstrap_window = await bootstrap_ckpt._discover_latest(
+                prefer_highest_staked=True
+            )
+
+        if bootstrap_window is not None:
+            res = await bootstrap_ckpt.download_and_load(
+                model=instance.model,
+                window=bootstrap_window,
+                shared_fs=True,
+                process_group=None,
+                prefer_highest_staked=True,
+            )
+            if res is not None:
+                ckpt_ok = True
+                from_bootstrap = True
+                ckpt_sync_win, ckpt_global_step = res
+                instance.model_initialized = True  # Model now has real weights
+                tplr.logger.info(
+                    f"Loaded bootstrap checkpoint (version={instance.bootstrap_version}, "
+                    f"window={ckpt_sync_win}, global_step={ckpt_global_step})"
+                )
+
+    # Handle global_step calculation if needed
+    if ckpt_ok and ckpt_global_step == -1:
+        if from_bootstrap:
+            # For bootstrap checkpoints, try to get the start_window from that version
+            bootstrap_start_window = await instance.comms.get_start_window(
+                version=instance.bootstrap_version
+            )
+            if bootstrap_start_window is not None:
+                ckpt_global_step = ckpt_sync_win - bootstrap_start_window
+                tplr.logger.info(
+                    f"Bootstrap checkpoint has no global_step, calculated as {ckpt_global_step} "
+                    f"(window {ckpt_sync_win} - bootstrap start {bootstrap_start_window})"
+                )
+            else:
+                # Fallback if we can't get bootstrap start_window
+                ckpt_global_step = 0
+                tplr.logger.info(
+                    f"Bootstrap checkpoint has no global_step and couldn't fetch bootstrap start_window, "
+                    f"setting to 0 (will be corrected during catch-up)"
+                )
+        else:
+            # For current version checkpoints, calculate from window difference
+            ckpt_global_step = ckpt_sync_win - instance.start_window
+            tplr.logger.info(
+                f"No global_step in checkpoint, calculated as {ckpt_global_step} "
+                f"(window {ckpt_sync_win} - start {instance.start_window})"
+            )
+
+    if ckpt_ok:
+        instance.global_step = ckpt_global_step
+
+    return ckpt_ok, ckpt_sync_win, ckpt_global_step, from_bootstrap
+
+
+async def handle_checkpoint_catchup(
+    instance: NeuronT,
+    ckpt_ok: bool,
+    ckpt_sync_win: int,
+    ckpt_global_step: int,
+    from_bootstrap: bool,
+) -> None:
+    """
+    Handle catch-up logic after checkpoint loading and replay scheduler steps.
+
+    Args:
+        instance: Miner or Validator instance
+        ckpt_ok: Whether a checkpoint was successfully loaded
+        ckpt_sync_win: Window number from checkpoint
+        ckpt_global_step: Global step from checkpoint
+        from_bootstrap: Whether checkpoint was from bootstrap version
+    """
+    # Decide catch-up windows and run catch-up on ALL ranks
+    # When loading from bootstrap, we always need to catch up from start_window
+    # to ensure we're using current version's gradients
+    if not ckpt_ok:
+        # No checkpoint found, catch up from start_window
+        tplr.logger.info("No checkpoint found, will catch up from start_window")
+        await catchup_with_aggregation_server(instance, instance.start_window)
+    elif from_bootstrap:
+        # Loading from bootstrap, catch up from start_window with current version gradients
+        tplr.logger.info(
+            f"Loaded bootstrap checkpoint, catching up from start_window "
+            f"{instance.start_window} to {instance.current_window}"
+        )
+        await catchup_with_aggregation_server(instance, instance.start_window)
+    elif ckpt_sync_win < instance.current_window:
+        # Current version checkpoint is behind, catch up from checkpoint window
+        catch_up_start = max(ckpt_sync_win, instance.start_window)
+        tplr.logger.info(
+            f"Checkpoint at window {ckpt_sync_win} is behind current {instance.current_window}, "
+            f"catching up from {catch_up_start}"
+        )
+        await catchup_with_aggregation_server(instance, catch_up_start)
+    else:
+        tplr.logger.info(
+            f"Checkpoint at window {ckpt_sync_win} is up to date with current window "
+            f"{instance.current_window}"
+        )
+
+    # Replay scheduler steps based on windows completed from checkpoint
+    # ckpt_global_step tracks windows, scheduler needs inner_steps per window
+    total_inner_steps = ckpt_global_step * instance.hparams.inner_steps
+    if total_inner_steps > 0:
+        for _ in range(total_inner_steps):
+            instance.inner_scheduler.step()
+        tplr.logger.info(
+            f"Replayed {total_inner_steps} scheduler steps (checkpoint global_step="
+            f"{ckpt_global_step} * {instance.hparams.inner_steps} inner_steps)"
+        )
 
 
 async def catchup_with_aggregation_server(
@@ -724,7 +894,9 @@ async def catchup_with_aggregation_server(
             is_master=instance.is_master,  # rank-0 handles logging
             world_size=instance.world_size,
             use_dct=instance.hparams.use_dct,
-            wandb_run=instance.wandb if instance.is_master else None,
+            wandb_run=instance.wandb
+            if instance.is_master and isinstance(instance.wandb, Run)
+            else None,
             global_step=instance.global_step,
         )
 
@@ -771,8 +943,7 @@ async def catchup_with_aggregation_server(
                     debug_dict = debug_fetch.data  # validator's payload
 
                     # --- update EMA of parameter‑slice changes ------------------
-                    bare_model = getattr(instance.model, "module", instance.model)
-                    for name, p in bare_model.named_parameters():
+                    for name, p in instance.model.named_parameters():
                         if p.numel() < 2:
                             continue
 
@@ -982,8 +1153,7 @@ async def check_uid_index_overlap(
     total_weight = 0.0
 
     # ── 2. iterate over parameters that have compressed indices ───────────
-    bare_model = getattr(neuron.model, "module", neuron.model)
-    for pname, _ in bare_model.named_parameters():
+    for pname, _ in neuron.model.named_parameters():
         idx_key = pname + "idxs"
         idxs_all = getattr(gather_result.state_dict, idx_key, None)
         if idxs_all is None:

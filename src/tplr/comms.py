@@ -2377,7 +2377,9 @@ class Comms(ChainManager):
                 tplr.logger.error(f"Error fetching peer list: {e}")
                 await asyncio.sleep(10)
 
-    async def get_start_window(self, retries: int = -1) -> int | None:
+    async def get_start_window(
+        self, retries: int = -1, version: str | None = None
+    ) -> int | None:
         """
         Retrieves the official start window from the highest-staked validator.
 
@@ -2389,6 +2391,8 @@ class Comms(ChainManager):
         Args:
             retries (int, optional): The number of times to retry fetching the start
                 window. A value of -1 means infinite retries. Defaults to -1.
+            version (str, optional): Specific version to fetch start_window for.
+                Defaults to current version.
 
         Returns:
             int | None: The start window number if successfully fetched, otherwise None.
@@ -2412,8 +2416,9 @@ class Comms(ChainManager):
                     f"Attempting to fetch start_window from UID {validator_uid} bucket {validator_bucket.name}"
                 )
 
+                target_version = version if version else tplr.__version__
                 start_window_data = await self.s3_get_object(
-                    key=f"start_window_v{tplr.__version__}.json",
+                    key=f"start_window_v{target_version}.json",
                     bucket=validator_bucket,
                 )
 

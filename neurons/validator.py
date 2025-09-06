@@ -233,7 +233,11 @@ class Validator(BaseNode, Trainer):
         self.device = torch.device(self.config.device)
         tplr.logger.info(f"[Init] device set → {self.device}")
 
-        self.init_model(validator=True)
+        # Initialize model on meta device first
+        self.init_model(validator=True, meta=True)
+        # Move model from meta to actual device (allocates memory but no initialization)
+        self.model = self.model.to_empty(device=str(self.device))
+        self.model_initialized = False  # Track if model has actual weights
         self.ckpt = tplr.DCPCheckpointer(
             self.comms, uid=self.uid, version=tplr.__version__
         )
@@ -255,9 +259,7 @@ class Validator(BaseNode, Trainer):
 
         self.xshapes = {}
         self.totalks = {}
-        # Use bare_model like the miner does to ensure consistent parameter iteration
         for n, p in self.model.named_parameters():
-            # Use the same approach as miner for creating xshapes and totalks
             enc = self.transformer.encode(
                 torch.empty(p.shape, dtype=torch.float16, device=self.device),
                 use_dct=self.hparams.use_dct,
@@ -375,7 +377,7 @@ class Validator(BaseNode, Trainer):
         self.prev_param_state: dict[str, torch.Tensor] = {}
         self.param_change_alpha = 0.2
 
-        self.windows_per_shard = getattr(self.hparams, "windows_per_shard")
+        self.outer_steps_per_shard = getattr(self.hparams, "outer_steps_per_shard")
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
             rank=self.rank,
@@ -766,13 +768,12 @@ class Validator(BaseNode, Trainer):
             self.comms.peers = self.config.peers
 
         # Only master fetches commitments and updates peers
+        self.comms.commitments = await self.comms.get_commitments()
         if self.is_master:
-            self.comms.commitments = await self.comms.get_commitments()
             self.comms.update_peers_with_buckets()
             tplr.logger.info("Loaded commitments")
-        else:
-            self.comms.commitments = {}
 
+        tensor = torch.tensor([0], dtype=torch.long, device=self.device)
         # Handle start_window similar to miner - only master rank checks and posts
         if self.is_master:
             peer_start = tplr.T()
@@ -784,43 +785,41 @@ class Validator(BaseNode, Trainer):
             if self.uid == self.comms.metagraph.S.argmax().item():
                 # Check if an existing start window already exists
                 try:
-                    existing_start_window = await self.comms.get_start_window(retries=2)
+                    start_window = await self.comms.get_start_window(retries=2)
                 except Exception as e:
                     tplr.logger.warning(f"Error fetching existing start_window: {e}")
-                    existing_start_window = None
+                    start_window = None
 
-                if existing_start_window is not None:
-                    self.start_window = existing_start_window
+                if start_window is not None:
                     tplr.logger.info(
-                        f"Highest staked validator found existing start_window: {self.start_window}"
+                        f"Highest staked validator found existing start_window: {start_window}"
                     )
                 else:
                     # No existing start window, so post new start window to R2
                     await self.comms.post_start_window(cast(int, self.start_window))
+                    start_window = self.start_window
                     tplr.logger.info(
-                        f"This validator is the highest staked. Posted start_window: {self.start_window}"
+                        f"This validator is the highest staked. Posted start_window: {start_window}"
                     )
             else:
                 tplr.logger.info(
                     "This validator is not the highest staked. Waiting to fetch start_window."
                 )
-                self.start_window = await self.comms.get_start_window()
+                start_window = await self.comms.get_start_window()
 
             # Broadcast start_window to all ranks if distributed
-            val = -1 if self.start_window is None else self.start_window
+            val = -1 if start_window is None else start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
-            dist_helper.broadcast(tensor, src=0)
-        else:
-            # Non-master ranks receive start_window via broadcast
-            tensor = torch.tensor([0], dtype=torch.long, device=self.device)
-            dist_helper.broadcast(tensor, src=0)
-            val = tensor.item()
-            self.start_window = None if val == -1 else int(val)
 
-        if self.start_window is None:
+        dist_helper.broadcast(tensor, src=0)
+        val = tensor.item()
+        start_window = None if val == -1 else int(val)
+
+        if start_window is None:
             raise RuntimeError(
                 "Could not find a valid start window. This should not be possible."
             )
+        self.start_window = start_window
 
         # global_step tracks actual outer steps performed (starts at 0)
         self.global_step = 0
@@ -828,12 +827,29 @@ class Validator(BaseNode, Trainer):
             f"Using start_window: {self.start_window}, global_step: {self.global_step}"
         )
 
-        current_shard = self.global_step // self.windows_per_shard
+        current_shard = self.global_step // self.outer_steps_per_shard
         _ = await self.dataset_manager.initialize_datasets(current_shard)
         self.set_dataloader(validator=True)
 
-        # Load the most recent checkpoint
-        _ = await self.load_checkpoint()
+        # Load checkpoint using consolidated logic
+        (
+            ckpt_ok,
+            ckpt_sync_win,
+            ckpt_global_step,
+            from_bootstrap,
+        ) = await tplr.neurons.load_checkpoint_with_fallback(self)
+
+        # If no checkpoint was loaded, initialize model weights now
+        if not self.model_initialized:
+            tplr.logger.info("No checkpoint loaded, initializing model weights...")
+            # Initialize weights using the same deterministic init as model_factory
+            self.init_model(validator=True, meta=False)
+            self.model_initialized = True
+
+        # Handle catch-up and scheduler replay using consolidated logic
+        await tplr.neurons.handle_checkpoint_catchup(
+            self, ckpt_ok, ckpt_sync_win, ckpt_global_step, from_bootstrap
+        )
 
         if self.is_master:
             self.comms.start_commitment_fetcher()
@@ -864,7 +880,10 @@ class Validator(BaseNode, Trainer):
             window_start = tplr.T()
 
             # Check if we need to swap dataset based on actual outer steps taken
-            if self.global_step > 0 and self.global_step % self.windows_per_shard == 0:
+            if (
+                self.global_step > 0
+                and self.global_step % self.outer_steps_per_shard == 0
+            ):
                 tplr.logger.info(f"Swapping dataset at window {self.current_window}")
                 await self.dataset_manager.swap_datasets()
                 self.set_dataloader(validator=True)
@@ -3176,68 +3195,6 @@ class Validator(BaseNode, Trainer):
             )
         except Exception as e:
             tplr.logger.warning(f"Failed to restore OpenSkill ratings: {e}")
-
-    async def load_checkpoint(self) -> None:
-        checkpoint_window_buffer = 5
-        has_new_checkpoint = (
-            self.global_step
-            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
-        )
-        # Proceed to load checkpoint
-        #   • rank-0 (or single-GPU run) downloads & catches-up
-        #   • remaining ranks receive state via NCCL broadcast
-        res = await self.ckpt.download_and_load(
-            model=self.model,
-            window=None,  # latest
-            shared_fs=True,
-            process_group=None,
-            prefer_highest_staked=True,
-        )
-        if res is not None:
-            ckpt_ok = True
-            ckpt_sync_win, ckpt_global_step = res
-        else:
-            ckpt_ok = False
-            ckpt_sync_win, ckpt_global_step = 0, self.global_step
-
-        assert self.start_window is not None
-        if ckpt_ok:
-            self.global_step = ckpt_global_step  # Restore global_step from checkpoint
-            tplr.logger.info(
-                f"Checkpoint loaded (sync_window={ckpt_sync_win}, global_step={ckpt_global_step})"
-            )
-        else:
-            tplr.logger.info("No checkpoint found – starting from scratch")
-
-        # Decide catch-up windows and run catch-up on ALL ranks (avoids DTensor collective hangs)
-        need_catchup = (not ckpt_ok) or (
-            ckpt_ok
-            and ckpt_sync_win < self.current_window
-            and self.global_step > checkpoint_window_buffer
-        )
-
-        if need_catchup:
-            start_from = (
-                self.start_window
-                if not ckpt_ok
-                else max(ckpt_sync_win, self.start_window)
-            )
-            tplr.logger.info(
-                f"Checkpoint is behind current window ({ckpt_sync_win} < {self.current_window}), starting catchup..."
-            )
-            await tplr.neurons.catchup_with_aggregation_server(self, start_from)
-        else:
-            tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
-
-        # Replay scheduler steps if checkpoint was loaded
-        if ckpt_ok:
-            steps_to_replay = (
-                ckpt_sync_win - self.start_window + 1
-            ) * self.hparams.inner_steps
-            for _ in range(steps_to_replay):
-                self.inner_scheduler.step()
-
-        return
 
     def bin_evaluation_peers(self, num_bins: int) -> dict[int, list[int]]:
         """

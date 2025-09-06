@@ -1,3 +1,21 @@
+# The MIT License (MIT)
+# © 2025 tplr.ai
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+# documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+# the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+# THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+
+
 """Efficient evaluator leveraging existing Templar infrastructure.
 
 Key features:
@@ -877,7 +895,7 @@ class Evaluator:
                     # Calculate global_step
                     global_step = window - self.start_window if window > 0 else 0
                     tplr.logger.info(
-                        "No global step in checkpoint sidecar."
+                        "No global step in checkpoint sidecar. "
                         f"Calculating from start window to be {global_step}."
                     )
 
@@ -977,22 +995,47 @@ class Evaluator:
         # Start background tasks
         self.comms.commitments = await self.comms.get_commitments()
 
-        # Get the start window for global_step calculation
-        start_window = await self.comms.get_start_window()
+        # Get the start window for global_step calculation (master fetches, then broadcasts)
+        if self.is_master:
+            start_window = await self.comms.get_start_window()
+            assert start_window is not None
+            self.start_window = start_window
+
+            # Prepare tensor for broadcasting
+            val = -1 if self.start_window is None else self.start_window
+            tensor = torch.tensor([val], dtype=torch.long, device=self.device)
+        else:
+            # Non-master ranks prepare empty tensor
+            tensor = torch.zeros(1, dtype=torch.long, device=self.device)
+
+        # Broadcast start_window to all ranks
+        dist_helper.broadcast(tensor, src=0)
+        val = tensor.item()
+        start_window = None if val == -1 else int(val)
         assert start_window is not None
         self.start_window = start_window
 
         # Check for initial checkpoint
         latest = await self.check_latest_checkpoint()
 
-        if latest is None and not self.baseline_evaluated:
-            # No checkpoints - run baseline once
+        # Check if bootstrap version is configured
+        bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
+
+        if latest is None and not self.baseline_evaluated and not bootstrap_version:
+            # No checkpoints and no bootstrap - run baseline once
             if self.is_master:
                 tplr.logger.info(
-                    "[Master] No checkpoints found. Running baseline evaluation."
+                    "[Master] No checkpoints found and no bootstrap configured. Running baseline evaluation."
                 )
             if await self.evaluate_window(start_window, is_baseline=True):
                 self.baseline_evaluated = True
+        elif latest is None and bootstrap_version:
+            # No checkpoints but bootstrap configured - skip baseline
+            if self.is_master:
+                tplr.logger.info(
+                    f"[Master] No checkpoints found but bootstrap version {bootstrap_version} configured. "
+                    f"Skipping baseline evaluation."
+                )
         elif latest is not None:
             # Evaluate latest checkpoint
             if self.is_master:

@@ -24,13 +24,13 @@ import os
 import random
 import sys
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
 from types import SimpleNamespace
-from typing import cast
+from typing import Deque, cast
 
 import bittensor as bt
 import numpy as np
@@ -233,7 +233,11 @@ class Validator(BaseNode, Trainer):
         self.device = torch.device(self.config.device)
         tplr.logger.info(f"[Init] device set → {self.device}")
 
-        self.init_model(validator=True)
+        # Initialize model on meta device first
+        self.init_model(validator=True, meta=True)
+        # Move model from meta to actual device (allocates memory but no initialization)
+        self.model = self.model.to_empty(device=str(self.device))
+        self.model_initialized = False  # Track if model has actual weights
         self.ckpt = tplr.DCPCheckpointer(
             self.comms, uid=self.uid, version=tplr.__version__
         )
@@ -255,9 +259,7 @@ class Validator(BaseNode, Trainer):
 
         self.xshapes = {}
         self.totalks = {}
-        # Use bare_model like the miner does to ensure consistent parameter iteration
         for n, p in self.model.named_parameters():
-            # Use the same approach as miner for creating xshapes and totalks
             enc = self.transformer.encode(
                 torch.empty(p.shape, dtype=torch.float16, device=self.device),
                 use_dct=self.hparams.use_dct,
@@ -307,24 +309,22 @@ class Validator(BaseNode, Trainer):
         self.previous_avg_loss_after_own = 0.0
         self.previous_avg_loss_before_random = 0.0
         self.previous_avg_loss_after_random = 0.0
-        self.valid_score_indices = []
 
         # Caching
         self.state_path = f"validator-state-{tplr.__version__}.pt"
+
+        # Initialize state tensors with zeros - will be overwritten by load_state on master
+        d = self.device
+        self.gradient_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.sync_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.final_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.binary_moving_averages = torch.zeros(256, dtype=torch.float32, device=d)
+        self.weights = torch.zeros(256, dtype=torch.float32, device=d)
+
+        # Master rank loads existing state if available
         if os.path.isfile(self.state_path):
-            self.load_state()
-        else:
-            d = self.device
-            self.gradient_scores = torch.zeros(256, dtype=torch.float32, device=d)
-            self.sync_scores = torch.zeros(256, dtype=torch.float32, device=d)
-            self.binary_indicator_scores = torch.zeros(
-                256, dtype=torch.float32, device=d
-            )
-            self.final_scores = torch.zeros(256, dtype=torch.float32, device=d)
-            self.binary_moving_averages = torch.zeros(
-                256, dtype=torch.float32, device=d
-            )
-            self.weights = torch.zeros(256, dtype=torch.float32, device=d)
+            self.load_state()  # Only executes on master rank due to check in load_state()
         self.evaluated_uids = set()
 
         # Add step tracking
@@ -377,7 +377,7 @@ class Validator(BaseNode, Trainer):
         self.prev_param_state: dict[str, torch.Tensor] = {}
         self.param_change_alpha = 0.2
 
-        self.windows_per_shard = getattr(self.hparams, "windows_per_shard")
+        self.outer_steps_per_shard = getattr(self.hparams, "outer_steps_per_shard")
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
             rank=self.rank,
@@ -386,6 +386,10 @@ class Validator(BaseNode, Trainer):
         )
 
         self.burn_uid = 1
+
+        # Track negative evaluation history for each peer (last 20 evaluations)
+        self.peer_eval_history: dict[int, Deque[bool]] = {}
+        self.eval_history_limit = 20  # Track last 20 evaluations per peer
 
     def reset_peer(self, uid: int) -> None:
         """
@@ -403,7 +407,51 @@ class Validator(BaseNode, Trainer):
         self.openskill_ratings.pop(uid, None)
         self.eval_peers.pop(uid, None)
         self.inactive_scores.pop(uid, None)
+        self.peer_eval_history.pop(uid, None)
         return
+
+    def track_negative_evaluation(self, eval_uid: int) -> None:
+        """
+        Track negative evaluation history for a peer over the last N evaluations.
+        Stores True for negative, False for positive. Frequency = mean(history).
+        """
+        # --- get score safely
+        is_negative = bool(self.gradient_scores[eval_uid] < 0)
+
+        # --- init on first use
+        if eval_uid not in self.peer_eval_history:
+            self.peer_eval_history[eval_uid] = deque(maxlen=self.eval_history_limit)
+
+        window = self.peer_eval_history[eval_uid]
+
+        # --- update window
+        window.append(is_negative)
+
+        # --- compute stats
+        total = len(window)
+        neg_count = sum(window)  # True==1, False==0
+        negative_freq = (neg_count / total) if total else 0.0
+
+        # --- logging (consider rate limiting in practice)
+        tplr.log_with_context(
+            level="info",
+            message=(
+                f"UID {eval_uid} negative eval frequency: "
+                f"{neg_count}/{total} ({negative_freq:.1%}) in last {total} evals"
+            ),
+            sync_window=self.sync_window,
+            current_window=self.current_window,
+            eval_uid=eval_uid,
+        )
+
+        self.wandb.log(
+            {
+                f"validator/negative_eval/count/{eval_uid}": neg_count,
+                f"validator/negative_eval/frequency/{eval_uid}": negative_freq,
+                f"validator/negative_eval/total_evals/{eval_uid}": total,
+            },
+            step=self.global_step,
+        )
 
     def log_sync_score(
         self, eval_uid: int, sync_result: dict[str, bool | float | int | str]
@@ -720,68 +768,88 @@ class Validator(BaseNode, Trainer):
             self.comms.peers = self.config.peers
 
         # Only master fetches commitments and updates peers
+        self.comms.commitments = await self.comms.get_commitments()
         if self.is_master:
-            self.comms.commitments = await self.comms.get_commitments()
             self.comms.update_peers_with_buckets()
             tplr.logger.info("Loaded commitments")
-        else:
-            self.comms.commitments = {}
 
+        tensor = torch.tensor([0], dtype=torch.long, device=self.device)
         # Handle start_window similar to miner - only master rank checks and posts
         if self.is_master:
+            peer_start = tplr.T()
+            await tplr.neurons.update_peers(
+                instance=self, window=self.current_window, peer_start=peer_start
+            )
+
             # Only post start window if you are the highest stake validator
             if self.uid == self.comms.metagraph.S.argmax().item():
                 # Check if an existing start window already exists
                 try:
-                    existing_start_window = await self.comms.get_start_window(retries=2)
+                    start_window = await self.comms.get_start_window(retries=2)
                 except Exception as e:
                     tplr.logger.warning(f"Error fetching existing start_window: {e}")
-                    existing_start_window = None
+                    start_window = None
 
-                if existing_start_window is not None:
-                    self.start_window = existing_start_window
+                if start_window is not None:
                     tplr.logger.info(
-                        f"Highest staked validator found existing start_window: {self.start_window}"
+                        f"Highest staked validator found existing start_window: {start_window}"
                     )
                 else:
                     # No existing start window, so post new start window to R2
                     await self.comms.post_start_window(cast(int, self.start_window))
+                    start_window = self.start_window
                     tplr.logger.info(
-                        f"This validator is the highest staked. Posted start_window: {self.start_window}"
+                        f"This validator is the highest staked. Posted start_window: {start_window}"
                     )
             else:
                 tplr.logger.info(
                     "This validator is not the highest staked. Waiting to fetch start_window."
                 )
-                self.start_window = await self.comms.get_start_window()
+                start_window = await self.comms.get_start_window()
 
             # Broadcast start_window to all ranks if distributed
-            val = -1 if self.start_window is None else self.start_window
+            val = -1 if start_window is None else start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
-            dist_helper.broadcast(tensor, src=0)
-        else:
-            # Non-master ranks receive start_window via broadcast
-            tensor = torch.tensor([0], dtype=torch.long, device=self.device)
-            dist_helper.broadcast(tensor, src=0)
-            val = tensor.item()
-            self.start_window = None if val == -1 else int(val)
 
-        if self.start_window is None:
+        dist_helper.broadcast(tensor, src=0)
+        val = tensor.item()
+        start_window = None if val == -1 else int(val)
+
+        if start_window is None:
             raise RuntimeError(
                 "Could not find a valid start window. This should not be possible."
             )
+        self.start_window = start_window
 
-        self.global_step = self.current_window - self.start_window
+        # global_step tracks actual outer steps performed (starts at 0)
+        self.global_step = 0
         tplr.logger.info(
             f"Using start_window: {self.start_window}, global_step: {self.global_step}"
         )
 
-        current_shard = self.global_step // self.windows_per_shard
+        current_shard = self.global_step // self.outer_steps_per_shard
         _ = await self.dataset_manager.initialize_datasets(current_shard)
         self.set_dataloader(validator=True)
 
-        # Load the most recent checkpoint
-        _ = await self.load_checkpoint()
+        # Load checkpoint using consolidated logic
+        (
+            ckpt_ok,
+            ckpt_sync_win,
+            ckpt_global_step,
+            from_bootstrap,
+        ) = await tplr.neurons.load_checkpoint_with_fallback(self)
+
+        # If no checkpoint was loaded, initialize model weights now
+        if not self.model_initialized:
+            tplr.logger.info("No checkpoint loaded, initializing model weights...")
+            # Initialize weights using the same deterministic init as model_factory
+            self.init_model(validator=True, meta=False)
+            self.model_initialized = True
+
+        # Handle catch-up and scheduler replay using consolidated logic
+        await tplr.neurons.handle_checkpoint_catchup(
+            self, ckpt_ok, ckpt_sync_win, ckpt_global_step, from_bootstrap
+        )
 
         if self.is_master:
             self.comms.start_commitment_fetcher()
@@ -811,7 +879,11 @@ class Validator(BaseNode, Trainer):
             # 2. Increment sync window and update peer lists
             window_start = tplr.T()
 
-            if self.global_step > 0 and self.global_step % self.windows_per_shard == 0:
+            # Check if we need to swap dataset based on actual outer steps taken
+            if (
+                self.global_step > 0
+                and self.global_step % self.outer_steps_per_shard == 0
+            ):
                 tplr.logger.info(f"Swapping dataset at window {self.current_window}")
                 await self.dataset_manager.swap_datasets()
                 self.set_dataloader(validator=True)
@@ -820,7 +892,7 @@ class Validator(BaseNode, Trainer):
             if self.is_master:
                 tplr.log_with_context(
                     level="info",
-                    message=f"Sync Window: {self.sync_window}, Global step: {self.global_step}",
+                    message=f"Sync Window: {self.sync_window}, Outer Steps Taken: {self.global_step}",
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
@@ -998,7 +1070,6 @@ class Validator(BaseNode, Trainer):
             skip_window = bool(skip_tensor.item())
 
             if skip_window:
-                self.global_step += 1
                 continue
 
             # --------------------------------------------------------------+
@@ -1114,7 +1185,6 @@ class Validator(BaseNode, Trainer):
             has_peers = has_peers_tensor.item()
 
             if not has_peers:
-                self.global_step += 1
                 continue
 
             # Barrier before evaluation starts (soft)
@@ -1627,6 +1697,9 @@ class Validator(BaseNode, Trainer):
                         eval_uid=eval_uid,
                     )
 
+                    # Track negative evaluation history
+                    self.track_negative_evaluation(eval_uid)
+
                 # Initialize or update OpenSkill rating for this peer
                 if eval_uid not in self.openskill_ratings and self.is_master:
                     self.openskill_ratings[eval_uid] = self.openskill_model.rating(
@@ -1781,6 +1854,9 @@ class Validator(BaseNode, Trainer):
             # 14. Now, merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
             update_start = tplr.T()
+
+            # Only perform outer step if we have gradients to apply
+            # We already checked skip_window above, so we know we should update
             self.outer_optimizer.zero_grad()
             self.model.zero_grad()
 
@@ -1799,6 +1875,8 @@ class Validator(BaseNode, Trainer):
                 wandb_run=self.wandb if self.is_master else None,
                 global_step=self.global_step,
             )
+            self.global_step += 1  # Increment only when we actually do an outer step
+            tplr.logger.info(f"Applied outer step #{self.global_step}")
 
             # Add barrier after model update to ensure all ranks complete the update
             tplr.log_with_context(
@@ -2017,7 +2095,7 @@ class Validator(BaseNode, Trainer):
                     "validator/network/evaluated_uids": len(self.evaluated_uids),
                     "validator/optimizer/outer_lr": self.lr,
                     "validator/optimizer/inner_lr": current_inner_lr,
-                    "validator/network/active_miners": len(self.valid_score_indices),
+                    "validator/network/active_miners": len(self.comms.active_peers),
                     "validator/gather/success_rate": success_rate * 100,
                     "validator/timing/window_total": window_total_time,
                     "validator/timing/peer_update": peer_update_time,
@@ -2064,7 +2142,7 @@ class Validator(BaseNode, Trainer):
                         "evaluated_uids_count": int(len(self.evaluated_uids)),
                         "outer_lr": float(self.lr),
                         "inner_lr": float(current_inner_lr),
-                        "active_miners_count": int(len(self.valid_score_indices)),
+                        "active_miners_count": int(len(self.comms.active_peers)),
                         "gather_success_rate": gather_success_rate,
                         "window_total_time": float(window_total_time),
                         "peer_update_time": float(peer_update_time),
@@ -2119,6 +2197,7 @@ class Validator(BaseNode, Trainer):
                     model=self.model,
                     window=self.sync_window,
                     sync_window=self.sync_window,
+                    global_step=self.global_step,
                     topology="FSDP",
                 )
 
@@ -2133,8 +2212,7 @@ class Validator(BaseNode, Trainer):
             # Synchronize all ranks before moving to next window
             dist_helper.safe_barrier("pre_next_window", self.local_rank)
 
-            # 19. Increment global step
-            self.global_step += 1
+            # 19. Global step is now incremented only in the outer_step block
 
             torch.cuda.empty_cache()
 
@@ -3025,7 +3103,10 @@ class Validator(BaseNode, Trainer):
         }
 
     async def save_state(self):
-        """Saves the current validator state to disk asynchronously."""
+        """Saves the current validator state to disk asynchronously (master rank only)."""
+        if not self.is_master:
+            return
+
         try:
             tplr.log_with_context(
                 level="info",
@@ -3040,7 +3121,7 @@ class Validator(BaseNode, Trainer):
             )
 
     def load_state(self):
-        """Loads the validator state from disk.
+        """Loads the validator state from disk (master rank only).
 
         This method deserializes the validator's state from the configured state path
         and updates the validator's internal state variables. The state includes:
@@ -3061,6 +3142,9 @@ class Validator(BaseNode, Trainer):
         All tensors are converted to float and moved to the configured device.
         Exceptions during loading are caught and logged as warnings.
         """
+        if not self.is_master:
+            return
+
         tplr.logger.info("Loading validator state")
 
         # ── stage 1: read file ─────────────────────────────────────────────
@@ -3111,60 +3195,6 @@ class Validator(BaseNode, Trainer):
             )
         except Exception as e:
             tplr.logger.warning(f"Failed to restore OpenSkill ratings: {e}")
-
-    async def load_checkpoint(self) -> None:
-        checkpoint_window_buffer = 5
-        has_new_checkpoint = (
-            self.global_step
-            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
-        )
-        # Proceed to load checkpoint
-        #   • rank-0 (or single-GPU run) downloads & catches-up
-        #   • remaining ranks receive state via NCCL broadcast
-        ckpt_sync_win = await self.ckpt.download_and_load(
-            model=self.model,
-            window=None,  # latest
-            shared_fs=True,
-            process_group=None,
-            prefer_highest_staked=True,
-        )
-        ckpt_ok = ckpt_sync_win is not None
-
-        assert self.start_window is not None
-        if ckpt_ok:
-            tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
-        else:
-            tplr.logger.info("No checkpoint found – starting from scratch")
-
-        # Decide catch-up windows and run catch-up on ALL ranks (avoids DTensor collective hangs)
-        need_catchup = (not ckpt_ok) or (
-            ckpt_ok
-            and ckpt_sync_win < self.current_window
-            and self.global_step > checkpoint_window_buffer
-        )
-
-        if need_catchup:
-            start_from = (
-                self.start_window
-                if not ckpt_ok
-                else max(ckpt_sync_win, self.start_window)
-            )
-            tplr.logger.info(
-                f"Checkpoint is behind current window ({ckpt_sync_win} < {self.current_window}), starting catchup..."
-            )
-            await tplr.neurons.catchup_with_aggregation_server(self, start_from)
-        else:
-            tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
-
-        # Replay scheduler steps if checkpoint was loaded
-        if ckpt_ok:
-            steps_to_replay = (
-                ckpt_sync_win - self.start_window + 1
-            ) * self.hparams.inner_steps
-            for _ in range(steps_to_replay):
-                self.inner_scheduler.step()
-
-        return
 
     def bin_evaluation_peers(self, num_bins: int) -> dict[int, list[int]]:
         """

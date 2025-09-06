@@ -81,9 +81,6 @@ class Trainer:
             dataset=self.dataset,
             sampler=self.sampler,
             batch_size=self.hparams.micro_batch_size,
-            num_workers=10,
-            pin_memory=True,
-            prefetch_factor=2,
         )
         tplr.logger.info("[Run] dataset + sampler ready")
         return
@@ -102,21 +99,26 @@ class Trainer:
 
         return expected_compressed_params
 
-    def init_model(self, validator=False):
+    def init_model(self, validator=False, meta=False):
         role = "miner"
         if validator:
             role = "validator"
 
-        # Init model with hparams config
-        # Initialize TorchTitan model using model factory
-        self.model = model_factory.initialize_torchtitan_model(
-            hparams=self.hparams,
-            role=role,
-            device=str(self.device),
-            world_size=self.world_size,
-        )
-        # Get bare model (unwrap DDP if needed)
-        self.bare_model = getattr(self.model, "module", self.model)
+        if meta:
+            # Create model on meta device (no memory allocation)
+            self.model = model_factory.create_meta_model(
+                hparams=self.hparams,
+                role=role,
+                world_size=self.world_size,
+            )
+        else:
+            # Initialize model with actual weights
+            self.model = model_factory.initialize_torchtitan_model(
+                hparams=self.hparams,
+                role=role,
+                device=str(self.device),
+                world_size=self.world_size,
+            )
         self.expected_compressed_params = self.get_expected_params()
         self.tokenizer = self.hparams.tokenizer
 
@@ -213,7 +215,6 @@ class Trainer:
                 )
             elif optimizer_type == "muon":
                 # Get bare model for parameter grouping
-                bare_model = getattr(self.model, "module", self.model)
 
                 # Get Muon-specific config
                 muon_config = optimizer_config.get("muon", {})
@@ -233,7 +234,7 @@ class Trainer:
                 scalar_params = []
                 head_params = []
 
-                for name, param in bare_model.named_parameters():
+                for name, param in self.model.named_parameters():
                     if not param.requires_grad:
                         continue
 

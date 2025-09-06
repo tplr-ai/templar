@@ -95,7 +95,7 @@ class DistributedHelper:
     def ddp_reduce(
         self,
         value: int | float | torch.Tensor,
-        op: dist.ReduceOp = dist.ReduceOp.SUM,
+        op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM,
         device: torch.device | None = None,
     ) -> float:
         """
@@ -299,10 +299,7 @@ class DistributedHelper:
         params_offloaded = []
         param_info = []
 
-        # Get bare model (unwrap DDP if needed)
-        bare_model = getattr(model, "module", model)
-
-        for param in bare_model.parameters():
+        for param in model.parameters():
             if isinstance(param, DT):
                 # Get the local TP shard and store the spec
                 local_param = param.to_local()
@@ -333,12 +330,9 @@ class DistributedHelper:
             params_offloaded: List of offloaded parameters
             param_specs: List of parameter specifications
         """
-        # Get bare model (unwrap DDP if needed)
-        bare_model = getattr(model, "module", model)
-
         with torch.no_grad():
             for (saved_param, param_meta), p in zip(
-                zip(params_offloaded, param_specs), bare_model.parameters()
+                zip(params_offloaded, param_specs), model.parameters()
             ):
                 if param_meta["is_dtensor"] and isinstance(p, DT):
                     # Handle TP DTensors

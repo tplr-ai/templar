@@ -20,6 +20,7 @@
 import asyncio
 import json
 import re
+import shutil
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -122,7 +123,14 @@ class DCPCheckpointer:
     • Download + DCP load (reshards to miner topology)
     """
 
-    def __init__(self, comms, *, uid: int, version: str, repo_root: str | Path = "."):
+    def __init__(
+        self,
+        comms: "tplr.Comms",
+        *,
+        uid: int,
+        version: str,
+        repo_root: str | Path = ".",
+    ):
         self.comms = comms
         self.uid = int(uid)
         self.version = version
@@ -225,6 +233,7 @@ class DCPCheckpointer:
         model,
         window: int,
         sync_window: int,
+        global_step: int,
         topology: str = "FSDP",
     ) -> "DCPCheckpointer.SaveHandle":
         """
@@ -246,6 +255,7 @@ class DCPCheckpointer:
                 "version": self.version,
                 "window": int(window),
                 "sync_window": int(sync_window),
+                "global_step": int(global_step),
                 "world_size_at_save": int(_world()),
                 "topology": topology,
                 "uid": self.uid,
@@ -601,7 +611,7 @@ class DCPCheckpointer:
                 continue
             t0 = time.perf_counter()
             await self.comms.s3_get_object(
-                key=key, bucket=bucket, load_data=False, show_progress=False
+                key=key, bucket=bucket, load_data=False, show_progress=True
             )
             dt = time.perf_counter() - t0
             tplr.logger.debug(
@@ -662,7 +672,7 @@ class DCPCheckpointer:
         shared_fs: bool = True,
         process_group: dist.ProcessGroup | None = None,
         prefer_highest_staked: bool = True,
-    ) -> int | None:
+    ) -> tuple[int, int] | None:
         local_dir = await (
             self.download_distributed(
                 window=window, prefer_highest_staked=prefer_highest_staked
@@ -676,5 +686,95 @@ class DCPCheckpointer:
             return None
         sidecar = json.loads((local_dir / "extra_metadata.json").read_text())
         w = int(sidecar["window"])
+        global_step = int(sidecar.get("global_step", -1))
         self.load_local(model=model, window=w, process_group=process_group)
-        return w
+        return w, global_step
+
+    async def check_checkpoint_exists(
+        self, *, window: int, prefer_highest_staked: bool = True
+    ) -> bool:
+        """Check if a checkpoint exists without downloading it.
+
+        Args:
+            window: Window number to check
+            prefer_highest_staked: Whether to check highest-staked validator's bucket first
+
+        Returns:
+            True if checkpoint exists and appears complete, False otherwise
+        """
+        try:
+            bucket = await self._choose_read_bucket(
+                prefer_highest_staked=prefer_highest_staked
+            )
+            s3 = await self.comms._get_s3_client(bucket)
+
+            # Check if the window directory exists with essential files
+            prefix = f"checkpoints/{self.version}/{window}/"
+
+            resp = await s3.list_objects_v2(
+                Bucket=bucket.name,
+                Prefix=prefix,
+                MaxKeys=10,  # Just check for a few files
+            )
+
+            objects = resp.get("Contents", [])
+            if not objects:
+                return False
+
+            # Check for essential files
+            has_metadata = any(".metadata" in obj.get("Key", "") for obj in objects)
+            has_shards = any("__0_0.distcp" in obj.get("Key", "") for obj in objects)
+            has_sidecar = any(
+                "extra_metadata.json" in obj.get("Key", "") for obj in objects
+            )
+
+            return has_metadata and has_shards and has_sidecar
+
+        except Exception:
+            return False
+
+    def cleanup_local_checkpoints(self, keep_latest: int = 1) -> None:
+        """
+        Remove old local checkpoint directories, keeping only the latest N windows.
+
+        Args:
+            keep_latest: Number of latest checkpoints to keep (default: 1)
+        """
+        checkpoint_base = self.repo_root / "checkpoints" / self.version
+
+        if not checkpoint_base.exists():
+            return
+
+        # Get all window directories and extract window numbers
+        window_dirs = []
+        for d in checkpoint_base.iterdir():
+            if d.is_dir() and d.name.isdigit():
+                try:
+                    window_num = int(d.name)
+                    window_dirs.append((window_num, d))
+                except ValueError:
+                    continue
+
+        # Sort by window number (ascending)
+        window_dirs.sort(key=lambda x: x[0])
+
+        # Remove all but the latest keep_latest checkpoints
+        if len(window_dirs) > keep_latest:
+            for _, old_checkpoint in window_dirs[:-keep_latest]:
+                try:
+                    shutil.rmtree(old_checkpoint)
+                    if _rank() == 0:
+                        tplr.logger.info(
+                            f"[DCP] Removed old checkpoint: {old_checkpoint}"
+                        )
+                except Exception as e:
+                    if _rank() == 0:
+                        tplr.logger.warning(
+                            f"[DCP] Failed to remove {old_checkpoint}: {e}"
+                        )
+        else:
+            if _rank() == 0:
+                tplr.logger.info(
+                    f"[DCP] Checkpoint cleanup: {len(window_dirs)} checkpoints present, "
+                    f"keeping all (threshold: {keep_latest})"
+                )

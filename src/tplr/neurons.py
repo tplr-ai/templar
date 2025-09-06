@@ -17,6 +17,7 @@
 
 
 import asyncio
+import gc
 import math
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,7 @@ from wandb.sdk.wandb_run import Run
 
 import tplr
 from tplr.compress import unpack_12bit_indices
+from tplr.distributed import dist_helper
 
 if TYPE_CHECKING:
     from neurons.miner import Miner
@@ -242,8 +244,7 @@ def outer_step(
       - Calls optimizer.step() per param (others have grad=None, so they're skipped).
       - Frees all temporaries and grad immediately after each step.
     """
-    bare_model = getattr(model, "module", model)
-    bare_model.train()
+    model.train()
 
     # Free any existing grads entirely (do not allocate zeros)
     optimizer.zero_grad(set_to_none=True)
@@ -274,7 +275,7 @@ def outer_step(
     min_median_norm = float("inf")
     max_median_norm = float("-inf")
 
-    for name, p in bare_model.named_parameters():
+    for name, p in model.named_parameters():
         # ---- master decides if this param has an update; others receive a flag ----
         has_update = 0
         payload = None
@@ -498,11 +499,182 @@ async def update_peers(instance: NeuronT, window: int, peer_start: float) -> Non
         tplr.logger.info(f"Not time to replace peers: {reason}")
 
 
+async def load_checkpoint_with_fallback(
+    instance: NeuronT,
+) -> tuple[bool, int, int, bool]:
+    """
+    Load checkpoint with fallback logic.
+
+    1. First try loading from current version
+    2. If not found, try bootstrap version if configured
+    3. Return checkpoint status and metadata
+
+    Returns:
+        tuple of (checkpoint_ok, checkpoint_window, global_step, from_bootstrap)
+    """
+    ckpt_ok = False
+    ckpt_sync_win = 0
+    ckpt_global_step = 0
+    from_bootstrap = False
+
+    # First check if current version has any checkpoints
+    latest_current_window = await instance.ckpt._discover_latest(
+        prefer_highest_staked=True
+    )
+
+    if latest_current_window is not None:
+        # Current version checkpoint exists, load it
+        res = await instance.ckpt.download_and_load(
+            model=instance.model,
+            window=latest_current_window,
+            shared_fs=True,
+            process_group=None,
+            prefer_highest_staked=True,
+        )
+        if res is not None:
+            ckpt_ok = True
+            ckpt_sync_win, ckpt_global_step = res
+            instance.model_initialized = True  # Model now has real weights
+            tplr.logger.info(
+                f"Loaded current version checkpoint (window={ckpt_sync_win}, "
+                f"global_step={ckpt_global_step})"
+            )
+
+    # If no current version checkpoint and bootstrap is configured, try that
+    if not ckpt_ok and instance.bootstrap_version:
+        tplr.logger.info(
+            f"No current version checkpoint found, trying bootstrap version "
+            f"{instance.bootstrap_version}"
+        )
+        # Try specific window if configured, otherwise latest
+        bootstrap_window = getattr(instance.hparams, "checkpoint_init_window", None)
+        bootstrap_ckpt = tplr.DCPCheckpointer(
+            instance.comms,
+            uid=instance.uid,
+            version=instance.bootstrap_version,
+            repo_root=".",
+        )
+
+        # If no specific window configured, discover latest in bootstrap version
+        if bootstrap_window is None:
+            bootstrap_window = await bootstrap_ckpt._discover_latest(
+                prefer_highest_staked=True
+            )
+
+        if bootstrap_window is not None:
+            res = await bootstrap_ckpt.download_and_load(
+                model=instance.model,
+                window=bootstrap_window,
+                shared_fs=True,
+                process_group=None,
+                prefer_highest_staked=True,
+            )
+            if res is not None:
+                ckpt_ok = True
+                from_bootstrap = True
+                ckpt_sync_win, ckpt_global_step = res
+                instance.model_initialized = True  # Model now has real weights
+                tplr.logger.info(
+                    f"Loaded bootstrap checkpoint (version={instance.bootstrap_version}, "
+                    f"window={ckpt_sync_win}, global_step={ckpt_global_step})"
+                )
+
+    # Handle global_step calculation if needed
+    if ckpt_ok and ckpt_global_step == -1:
+        if from_bootstrap:
+            # For bootstrap checkpoints, try to get the start_window from that version
+            bootstrap_start_window = await instance.comms.get_start_window(
+                version=instance.bootstrap_version
+            )
+            if bootstrap_start_window is not None:
+                ckpt_global_step = ckpt_sync_win - bootstrap_start_window
+                tplr.logger.info(
+                    f"Bootstrap checkpoint has no global_step, calculated as {ckpt_global_step} "
+                    f"(window {ckpt_sync_win} - bootstrap start {bootstrap_start_window})"
+                )
+            else:
+                # Fallback if we can't get bootstrap start_window
+                ckpt_global_step = 0
+                tplr.logger.info(
+                    f"Bootstrap checkpoint has no global_step and couldn't fetch bootstrap start_window, "
+                    f"setting to 0 (will be corrected during catch-up)"
+                )
+        else:
+            # For current version checkpoints, calculate from window difference
+            ckpt_global_step = ckpt_sync_win - instance.start_window
+            tplr.logger.info(
+                f"No global_step in checkpoint, calculated as {ckpt_global_step} "
+                f"(window {ckpt_sync_win} - start {instance.start_window})"
+            )
+
+    if ckpt_ok:
+        instance.global_step = ckpt_global_step
+
+    return ckpt_ok, ckpt_sync_win, ckpt_global_step, from_bootstrap
+
+
+async def handle_checkpoint_catchup(
+    instance: NeuronT,
+    ckpt_ok: bool,
+    ckpt_sync_win: int,
+    ckpt_global_step: int,
+    from_bootstrap: bool,
+) -> None:
+    """
+    Handle catch-up logic after checkpoint loading and replay scheduler steps.
+
+    Args:
+        instance: Miner or Validator instance
+        ckpt_ok: Whether a checkpoint was successfully loaded
+        ckpt_sync_win: Window number from checkpoint
+        ckpt_global_step: Global step from checkpoint
+        from_bootstrap: Whether checkpoint was from bootstrap version
+    """
+    # Decide catch-up windows and run catch-up on ALL ranks
+    # When loading from bootstrap, we always need to catch up from start_window
+    # to ensure we're using current version's gradients
+    if not ckpt_ok:
+        # No checkpoint found, catch up from start_window
+        tplr.logger.info("No checkpoint found, will catch up from start_window")
+        await catchup_with_aggregation_server(instance, instance.start_window)
+    elif from_bootstrap:
+        # Loading from bootstrap, catch up from start_window with current version gradients
+        tplr.logger.info(
+            f"Loaded bootstrap checkpoint, catching up from start_window "
+            f"{instance.start_window} to {instance.current_window}"
+        )
+        await catchup_with_aggregation_server(instance, instance.start_window)
+    elif ckpt_sync_win < instance.current_window:
+        # Current version checkpoint is behind, catch up from checkpoint window
+        catch_up_start = max(ckpt_sync_win, instance.start_window)
+        tplr.logger.info(
+            f"Checkpoint at window {ckpt_sync_win} is behind current {instance.current_window}, "
+            f"catching up from {catch_up_start}"
+        )
+        await catchup_with_aggregation_server(instance, catch_up_start)
+    else:
+        tplr.logger.info(
+            f"Checkpoint at window {ckpt_sync_win} is up to date with current window "
+            f"{instance.current_window}"
+        )
+
+    # Replay scheduler steps based on windows completed from checkpoint
+    # ckpt_global_step tracks windows, scheduler needs inner_steps per window
+    total_inner_steps = ckpt_global_step * instance.hparams.inner_steps
+    if total_inner_steps > 0:
+        for _ in range(total_inner_steps):
+            instance.inner_scheduler.step()
+        tplr.logger.info(
+            f"Replayed {total_inner_steps} scheduler steps (checkpoint global_step="
+            f"{ckpt_global_step} * {instance.hparams.inner_steps} inner_steps)"
+        )
+
+
 async def catchup_with_aggregation_server(
     instance: NeuronT, checkpoint_current_window: int
 ) -> None:
     """
-    Synchronise the local model with the chain.
+    Synchronise the local model with the chain with memory optimizations.
 
     For every window between the checkpoint and the current chain head:
 
@@ -515,21 +687,36 @@ async def catchup_with_aggregation_server(
        `instance.comms.gather( ..., key="gradient", ... )` against the current
        peer-set and apply those gradients instead.
 
-    After each application we advance the inner LR scheduler, clear CUDA
-    cache, and (optionally) log a debug-dict comparison so we can estimate how
-    many optimisation steps we were behind the leader.
+    After each application we advance the inner LR scheduler, aggressively clear
+    memory including CUDA cache and CPU memory via garbage collection.
 
     The loop exits when `start_w` has caught up with `instance.current_window`
     (taking into account that the chain head may advance while we are replaying).
     """
-    tplr.logger.info("Starting catch‑up using aggregated_gradients...")
+    tplr.logger.info(
+        "Starting catch‑up using aggregated_gradients with memory optimization..."
+    )
     assert instance.start_window is not None
+
+    def log_memory_usage(prefix: str):
+        """Log current memory usage statistics."""
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            max_memory = torch.cuda.max_memory_allocated() / 1024**3
+            tplr.logger.info(
+                f"{prefix} - GPU Memory: Allocated={allocated:.2f}GB, "
+                f"Reserved={reserved:.2f}GB, Max={max_memory:.2f}GB"
+            )
 
     leader_uid: int = instance.comms.metagraph.S.argmax().item()
 
     start_w = checkpoint_current_window + 1
     target_w = instance.current_window
     tplr.logger.info(f"Replaying windows {start_w} ... {target_w - 1}")
+
+    # Log initial memory state
+    log_memory_usage("Initial memory state")
 
     # Verify checkpoint loaded correctly before applying any gradients
     if checkpoint_current_window > 0 and instance.is_master:
@@ -584,6 +771,11 @@ async def catchup_with_aggregation_server(
         # 1) Fetch the aggregated object dumped by the leader validator.
         # ------------------------------------------------------------------
         if instance.is_master:
+            # Clear memory before fetching to maximize available space
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             fetch = await instance.comms.get(
                 uid=str(leader_uid),
                 window=start_w,
@@ -606,6 +798,12 @@ async def catchup_with_aggregation_server(
                     skipped_uids=payload.get("skipped_uids", []),
                     success_rate=payload.get("success_rate", 0.0),
                 )
+
+                # Clear the original payload dict to free memory immediately
+                del payload
+                if hasattr(fetch, "data"):
+                    fetch.data = None
+                del fetch
 
             # ── B. aggregated object *missing* or *malformed* ────────────────
             else:
@@ -657,25 +855,23 @@ async def catchup_with_aggregation_server(
             gather_ns = None
 
         # Broadcast whether we should skip this window (master decides)
-        skip_window = False
-        if dist.is_available() and dist.is_initialized():
-            if instance.is_master:
-                skip_flag = 1 if gather_ns is None else 0
-                skip_tensor = torch.tensor(
-                    [skip_flag], dtype=torch.int32, device=instance.config.device
-                )
-            else:
-                skip_tensor = torch.tensor(
-                    [0], dtype=torch.int32, device=instance.config.device
-                )
-            dist.broadcast(skip_tensor, src=0)
-            skip_window = bool(skip_tensor.item())
-        elif instance.is_master and gather_ns is None:
-            skip_window = True
+        if instance.is_master:
+            skip_tensor = torch.tensor(
+                [1 if gather_ns is None else 0],
+                dtype=torch.int32,
+                device=instance.config.device,
+            )
+        else:
+            skip_tensor = torch.tensor(
+                [0], dtype=torch.int32, device=instance.config.device
+            )
+
+        dist_helper.broadcast(skip_tensor, src=0)
+        skip_window = bool(skip_tensor.item())
 
         # If skipping, continue to next window without updating scheduler
         if skip_window:
-            instance.global_step = start_w - instance.start_window
+            # Don't increment global_step as no outer step was performed
             start_w += 1
             continue
 
@@ -684,12 +880,7 @@ async def catchup_with_aggregation_server(
         # ------------------------------------------------------------------
         # Synchronize all ranks before applying the outer step to ensure
         # they're processing the same window together
-        if dist.is_available() and dist.is_initialized():
-            if torch.cuda.is_available():
-                device_id = torch.cuda.current_device()
-                dist.barrier(device_ids=[device_id])
-            else:
-                dist.barrier()
+        dist_helper.safe_barrier("catchup_pre_outer_step", instance.local_rank)
 
         outer_step(
             instance.model,
@@ -703,7 +894,9 @@ async def catchup_with_aggregation_server(
             is_master=instance.is_master,  # rank-0 handles logging
             world_size=instance.world_size,
             use_dct=instance.hparams.use_dct,
-            wandb_run=instance.wandb if instance.is_master else None,
+            wandb_run=instance.wandb
+            if instance.is_master and isinstance(instance.wandb, Run)
+            else None,
             global_step=instance.global_step,
         )
 
@@ -713,8 +906,26 @@ async def catchup_with_aggregation_server(
             for _ in range(instance.hparams.inner_steps):
                 inner_sched.step()
 
+        # Aggressive memory cleanup after each window
+        if instance.is_master and "gather_ns" in locals() and gather_ns is not None:
+            # Clear the gather result to free memory
+            if hasattr(gather_ns, "state_dict"):
+                # Clear all attributes from state_dict namespace
+                for key in list(vars(gather_ns.state_dict).keys()):
+                    delattr(gather_ns.state_dict, key)
+            del gather_ns
+
+        # Force garbage collection to free CPU memory
+        gc.collect()
+
+        # Clear CUDA cache and synchronize
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        # Log memory usage after cleanup
+        if instance.is_master and (start_w - checkpoint_current_window) % 5 == 0:
+            log_memory_usage(f"After window {start_w} cleanup")
         # ──────────────────────────────────────────────────────────────────────
         # 3) Debug‑dict comparison to estimate “how many steps behind” we are
         # ──────────────────────────────────────────────────────────────────────
@@ -732,8 +943,7 @@ async def catchup_with_aggregation_server(
                     debug_dict = debug_fetch.data  # validator's payload
 
                     # --- update EMA of parameter‑slice changes ------------------
-                    bare_model = getattr(instance.model, "module", instance.model)
-                    for name, p in bare_model.named_parameters():
+                    for name, p in instance.model.named_parameters():
                         if p.numel() < 2:
                             continue
 
@@ -782,21 +992,25 @@ async def catchup_with_aggregation_server(
         except Exception as exc:
             tplr.logger.warning(f"[catch‑up] debug‑dict processing error: {exc}")
 
-        instance.global_step = start_w - instance.start_window
+        # Increment global_step since we performed an outer step
+        instance.global_step += 1
         start_w += 1
 
-        if dist.is_available() and dist.is_initialized():
-            if torch.cuda.is_available():
-                device_id = torch.cuda.current_device()
-                dist.barrier(device_ids=[device_id])
-            else:
-                dist.barrier()
+        dist_helper.safe_barrier("catchup_post_window", instance.local_rank)
 
         # If the chain progressed while we were busy, extend the target.
         if instance.current_window > target_w:
             target_w = instance.current_window
 
-    instance.global_step = target_w - instance.start_window
+    # Final aggressive memory cleanup
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+
+    # Log final memory state
+    log_memory_usage("Final memory state after catchup")
     tplr.logger.info("Catch‑up finished – model now in sync.")
 
 
@@ -939,8 +1153,7 @@ async def check_uid_index_overlap(
     total_weight = 0.0
 
     # ── 2. iterate over parameters that have compressed indices ───────────
-    bare_model = getattr(neuron.model, "module", neuron.model)
-    for pname, _ in bare_model.named_parameters():
+    for pname, _ in neuron.model.named_parameters():
         idx_key = pname + "idxs"
         idxs_all = getattr(gather_result.state_dict, idx_key, None)
         if idxs_all is None:

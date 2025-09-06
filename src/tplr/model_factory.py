@@ -326,6 +326,52 @@ def create_parallel_dims(
         )
 
 
+def create_meta_model(
+    hparams: SimpleNamespace,
+    role: Literal["miner", "validator", "evaluator"] = "miner",
+    world_size: int = 1,
+) -> nn.Module:
+    """Create a TorchTitan model on meta device for fast checkpoint loading.
+
+    This creates the model structure without allocating memory for weights,
+    which is useful when you want to load a checkpoint directly.
+
+    Args:
+        hparams: Hyperparameters object from tplr.load_hparams()
+        role: Component role (miner, validator, or evaluator)
+        world_size: Number of distributed processes
+
+    Returns:
+        Model on meta device ready for checkpoint loading
+    """
+    # Get model arguments using predefined TorchTitan configs or custom hparams
+    titan_args = get_titan_model_args(hparams)
+
+    # Create parallelization dimensions
+    pdims = create_parallel_dims(world_size, hparams, role)
+
+    # Create job config
+    job_config = create_job_config(hparams, role)
+
+    if world_size > 1 and dist.is_available() and dist.is_initialized():
+        # Only build a mesh when distributed is initialized (avoids single-proc errors)
+        _ = pdims.build_mesh()
+
+    # Create model on meta device
+    with torch.device("meta"):
+        model = TitanLlama(titan_args)
+        model.args = titan_args
+
+    # Parallelize the model while still on meta device
+    model = parallelize_llama(
+        model,
+        parallel_dims=pdims,
+        job_config=job_config,
+    )
+
+    return model
+
+
 def initialize_torchtitan_model(
     hparams: SimpleNamespace,
     role: Literal["miner", "validator", "evaluator"] = "miner",

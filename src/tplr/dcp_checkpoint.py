@@ -20,6 +20,7 @@
 import asyncio
 import json
 import re
+import shutil
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -731,3 +732,49 @@ class DCPCheckpointer:
 
         except Exception:
             return False
+
+    def cleanup_local_checkpoints(self, keep_latest: int = 1) -> None:
+        """
+        Remove old local checkpoint directories, keeping only the latest N windows.
+
+        Args:
+            keep_latest: Number of latest checkpoints to keep (default: 1)
+        """
+        checkpoint_base = self.repo_root / "checkpoints" / self.version
+
+        if not checkpoint_base.exists():
+            return
+
+        # Get all window directories and extract window numbers
+        window_dirs = []
+        for d in checkpoint_base.iterdir():
+            if d.is_dir() and d.name.isdigit():
+                try:
+                    window_num = int(d.name)
+                    window_dirs.append((window_num, d))
+                except ValueError:
+                    continue
+
+        # Sort by window number (ascending)
+        window_dirs.sort(key=lambda x: x[0])
+
+        # Remove all but the latest keep_latest checkpoints
+        if len(window_dirs) > keep_latest:
+            for _, old_checkpoint in window_dirs[:-keep_latest]:
+                try:
+                    shutil.rmtree(old_checkpoint)
+                    if _rank() == 0:
+                        tplr.logger.info(
+                            f"[DCP] Removed old checkpoint: {old_checkpoint}"
+                        )
+                except Exception as e:
+                    if _rank() == 0:
+                        tplr.logger.warning(
+                            f"[DCP] Failed to remove {old_checkpoint}: {e}"
+                        )
+        else:
+            if _rank() == 0:
+                tplr.logger.info(
+                    f"[DCP] Checkpoint cleanup: {len(window_dirs)} checkpoints present, "
+                    f"keeping all (threshold: {keep_latest})"
+                )

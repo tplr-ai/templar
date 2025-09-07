@@ -342,6 +342,7 @@ class Miner(BaseNode, Trainer):
             rank=self.local_rank,
             world_size=self.world_size,
             comms=self.comms,
+            token_dtype=np.uint32,  # Match preprocessing script dtype
         )
         self.outer_steps_per_shard = getattr(self.hparams, "outer_steps_per_shard")
 

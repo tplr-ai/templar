@@ -45,7 +45,7 @@ class SharedShardedDataset(Dataset):
         rank: int,
         world_size: int,
         *,
-        token_dtype: npt.DTypeLike = np.uint16,  # MUST match preprocessing
+        token_dtype: npt.DTypeLike = np.uint32,  # MUST match preprocessing
         file_prefix: str = "train",  # Allow custom file prefix (e.g., "val", "eval")
     ):
         super().__init__()
@@ -167,7 +167,7 @@ class ShardedDatasetManager:
         rank: int,
         world_size: int,
         comms: tplr.comms.Comms,
-        token_dtype: npt.DTypeLike = np.uint16,
+        token_dtype: npt.DTypeLike = np.uint32,
         file_prefix: str = "train",
     ):
         """Initializes the dataset manager.

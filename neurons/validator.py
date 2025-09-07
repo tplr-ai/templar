@@ -384,6 +384,7 @@ class Validator(BaseNode, Trainer):
             rank=self.rank,
             world_size=self.world_size,
             comms=self.comms,
+            token_dtype=np.uint32,  # Match preprocessing script dtype
         )
 
         self.burn_uid = 1

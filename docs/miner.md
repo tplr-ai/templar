@@ -38,7 +38,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Git**
 - **Cloudflare R2 Bucket Configuration**:
-  - **Dataset Setup**: The current dataset instructions can be found in the [Shared Sharded Dataset](./shared_sharded_datset.md) doc. Please configure your environment for this change. No pre-download is required, but bucket syncing is optional and recommended.
+  - **Dataset Setup**: The current dataset instructions can be found in the [Shared Sharded Dataset](./shared_sharded_dataset.md) doc. Please configure your environment for this change. No pre-download is required, but bucket syncing is optional and recommended.
   - **Gradient Bucket Setup**:
     1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
     2. **Generate Tokens**:
@@ -145,6 +145,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    Export necessary environment variables or create a `.env` file in the project root.
 
    ```bash
+   export HF_TOKEN=your_huggingface_token  # Required for tokenizer access
    export WANDB_API_KEY=your_wandb_api_key
    export INFLUXDB_TOKEN=your_influxdb_token
    export NODE_TYPE=your_node_type
@@ -217,6 +218,9 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 When using Docker Compose, set the following variables in the `docker/.env` file:
 
 ```dotenv:docker/.env
+# Required: Hugging Face token for tokenizer access
+HF_TOKEN=your_huggingface_token
+
 # Add your Weights & Biases API key
 WANDB_API_KEY=your_wandb_api_key
 INFLUXDB_TOKEN=your_influxdb_token

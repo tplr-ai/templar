@@ -45,7 +45,7 @@ This guide will help you set up and run a validator for **τemplar**. Validators
 - **Git**
 - **Python 3.12+** (for manual installation)
 - **Cloudflare R2 Bucket Configuration**:
-  - **Dataset Setup**: You must set up your own **DCLM dataset** (current dataset) following the instructions in the [R2 Dataset Guide](./r2_dataset.md)
+  - **Dataset Setup**: Follow the instructions in the [Shared Sharded Dataset Guide](./shared_sharded_dataset.md)
   - **Gradient Bucket Setup**:
     1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
     2. **Generate Tokens**:
@@ -118,6 +118,9 @@ This guide will help you set up and run a validator for **τemplar**. Validators
    Populate the `.env` file with your configuration. Variables to set:
 
    ```dotenv:docker/.env
+   # Required: Hugging Face token for tokenizer access
+   HF_TOKEN=<your_huggingface_token>
+   
    # Add your Weights & Biases API key
    WANDB_API_KEY=<your_wandb_api_key>
 
@@ -132,8 +135,7 @@ This guide will help you set up and run a validator for **τemplar**. Validators
    R2_GRADIENTS_WRITE_ACCESS_KEY_ID=<your_r2_write_access_key_id>
    R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=<your_r2_write_secret_access_key>
 
-   # Dataset R2 credentials - You must set up your own DCLM dataset (current dataset)
-   # See: ./r2_dataset.md for instructions
+   # Dataset R2 credentials - See docs/shared_sharded_dataset.md for instructions
    R2_DATASET_ACCOUNT_ID=<your_dataset_account_id>
    R2_DATASET_BUCKET_NAME=<your_dataset_bucket_name>
    R2_DATASET_READ_ACCESS_KEY_ID=<your_dataset_read_access_key_id>
@@ -206,6 +208,7 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
 4. **Set Up Python Environment**:
 
    ```bash
+   export HF_TOKEN=your_huggingface_token  # Required for tokenizer access
    export WANDB_API_KEY=your_wandb_api_key
    export NODE_TYPE=your_node_type
    export WALLET_NAME=your_wallet_name
@@ -223,8 +226,7 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
    export R2_GRADIENTS_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
    export R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
 
-   # Dataset R2 credentials - You must set up your own DCLM dataset (current dataset)
-   # See docs/r2_dataset.md for instructions
+   # Dataset R2 credentials - See docs/shared_sharded_dataset.md for instructions
    export R2_DATASET_ACCOUNT_ID=your_dataset_account_id
    export R2_DATASET_BUCKET_NAME=your_dataset_bucket_name
    export R2_DATASET_READ_ACCESS_KEY_ID=your_dataset_read_access_key_id
@@ -277,6 +279,9 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
 Set the following in the `docker/.env` file when using Docker Compose:
 
 ```dotenv:docker/.env
+# Required: Hugging Face token for tokenizer access
+HF_TOKEN=your_huggingface_token
+
 WANDB_API_KEY=your_wandb_api_key
 INFLUXDB_TOKEN=your_influxdb_token
 
@@ -299,8 +304,7 @@ R2_GRADIENTS_READ_SECRET_ACCESS_KEY=your_r2_gradients_read_secret_access_key
 R2_GRADIENTS_WRITE_ACCESS_KEY_ID=your_r2_gradients_write_access_key_id
 R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_gradients_write_secret_access_key
 
-# Dataset R2 credentials - You must set up your own DCLM dataset (current dataset)
-# See docs/r2_dataset.md for instructions
+# Dataset R2 credentials - See docs/shared_sharded_dataset.md for instructions
 R2_DATASET_ACCOUNT_ID=your_dataset_account_id
 R2_DATASET_BUCKET_NAME=your_dataset_bucket_name
 R2_DATASET_READ_ACCESS_KEY_ID=your_dataset_read_access_key_id

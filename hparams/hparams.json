@@ -1,7 +1,7 @@
 {
     "spec_version": 5,
     "project": "dough",
-    "tokenizer_name": "togethercomputer/LLaMA-2-7B-32K",
+    "tokenizer_name": "google/gemma-3-270m",
     "sequence_length": 2048,
     "micro_batch_size": 1,
     "target_batch_size": 1024,

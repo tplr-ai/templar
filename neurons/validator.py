@@ -381,7 +381,7 @@ class Validator(BaseNode, Trainer):
         self.outer_steps_per_shard = getattr(self.hparams, "outer_steps_per_shard")
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
-            rank=self.rank,
+            rank=self.local_rank,  # Use local_rank for proper file operations
             world_size=self.world_size,
             comms=self.comms,
             token_dtype=np.uint32,  # Match preprocessing script dtype
@@ -830,7 +830,13 @@ class Validator(BaseNode, Trainer):
         )
 
         current_shard = self.global_step // self.outer_steps_per_shard
+
+        # Initialize datasets (only rank 0 downloads, handled internally by dataset_manager)
         _ = await self.dataset_manager.initialize_datasets(current_shard)
+
+        # Synchronize all ranks after dataset initialization
+        dist_helper.safe_barrier("dataset_init_complete", self.local_rank)
+
         self.set_dataloader(validator=True)
 
         # Load checkpoint using consolidated logic
@@ -889,6 +895,7 @@ class Validator(BaseNode, Trainer):
                 tplr.logger.info(f"Swapping dataset at window {self.current_window}")
                 await self.dataset_manager.swap_datasets()
                 self.set_dataloader(validator=True)
+                dist_helper.safe_barrier("sync_shard_switch", self.local_rank)
 
             self.sync_window += 1
             if self.is_master:

@@ -391,14 +391,11 @@ class Miner(BaseNode, Trainer):
             f"Starting with global_step=0 (actual outer steps), window offset={window_offset}"
         )
 
-        if self.is_master:
-            _ = await self.dataset_manager.initialize_datasets(current_shard)
-            dist_helper.safe_barrier("post_dataset_init_master", self.local_rank)
+        # Initialize datasets (only rank 0 downloads, handled internally by dataset_manager)
+        _ = await self.dataset_manager.initialize_datasets(current_shard)
 
-        else:
-            # barrier to start so that master finalized the dataset download
-            dist_helper.safe_barrier("wait_for_dataset_init", self.local_rank)
-            await self.dataset_manager.initialize_datasets(current_shard)
+        # Synchronize all ranks after dataset initialization
+        dist_helper.safe_barrier("dataset_init_complete", self.local_rank)
 
         # All workers need to instantiate dataloader
         self.set_dataloader()

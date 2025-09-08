@@ -35,6 +35,7 @@ import bittensor as bt
 import boto3
 import botocore
 import torch
+from torch.utils.data import Dataset, WeightedRandomSampler
 from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
 from boto3.s3.transfer import TransferConfig
@@ -2698,38 +2699,24 @@ class Comms(ChainManager):
             tplr.logger.warning("Invalid input detected. Returning empty list.")
             return []
 
-        # Pair up each candidate with its weight
-        pool = list(zip(candidates, weights))
-        total_w = float(sum(weights))
-        selected = []
-
-        # If total weight is 0, return empty
-        if total_w <= 0:
-            tplr.logger.warning("Total weight is zero. Returning empty list")
+        if len(candidates) != len(weights):
+            tplr.logger.warning("Candidates and weights must have the same length")
             return []
 
-        tplr.logger.debug(f"Initial total weight: {total_w}")
+        if k > len(candidates):
+            tplr.logger.warning("Sample size (k) is greater than the number of candidates")
+            return []
+        # k = min(k, len(candidates))
 
-        for _ in range(min(k, len(candidates))):
-            if total_w <= 0 or len(pool) == 0:
-                tplr.logger.info("No more items to sample. Stopping early.")
-                break
+        # I use torch.utils.data.WeightedRandomSampler because it is faster than random.choices
+        sampler = WeightedRandomSampler(weights, k, replacement=False)
+        selected_indecies = list(sampler)
 
-            # Draw a uniform sample in [0, total_w]
-            r = random.uniform(0.0, total_w)
-            tplr.logger.debug(f"Random threshold: {r}")
-            cumulative = 0.0
-            for idx, (uid, w) in enumerate(pool):
-                cumulative += w
-                if cumulative >= r:
-                    # Found our pick
-                    selected.append(uid)
-                    tplr.logger.info(f"Selected item: {uid} with weight {w}")
-                    # Remove from pool and subtract from total_w
-                    total_w -= w
-                    pool.pop(idx)
-                    tplr.logger.debug(f"Updated total weight: {total_w}")
-                    break
+        # Safely map indicies to candidates
+        selected = [candidates[i] for i in selected_indecies if 0 <= i < len(candidates)]
+
+        if len(selected) != k:
+            tplr.logger.warning(f"Selected {len(selected)} items instead of {k}")
 
         tplr.logger.debug(f"Final selected items: {selected}")
         return selected

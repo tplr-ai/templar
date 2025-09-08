@@ -1,0 +1,78 @@
+---
+- name: Check if custom SSL certificates are provided
+  local_action:
+    module: stat
+    path: "{{ item }}"
+  register: custom_ssl_cert_exists
+  loop:
+    - "{{ playbook_dir }}/roles/nginx/files/subtensor_cert.pem"
+    - "{{ playbook_dir }}/roles/nginx/files/subtensor_key.pem"
+  changed_when: false
+  become: false
+  when: nginx_use_custom_ssl_cert | default(false)
+
+- name: Install custom SSL certificates
+  copy:
+    src: "{{ item }}"
+    dest: "/etc/nginx/ssl/{{ item | basename }}"
+    owner: root
+    group: root
+    mode: 0600
+  loop:
+    - "subtensor_cert.pem"
+    - "subtensor_key.pem"
+  when: >
+    nginx_use_custom_ssl_cert | default(false) and
+    custom_ssl_cert_exists.results[0].stat.exists and
+    custom_ssl_cert_exists.results[1].stat.exists
+  notify: restart nginx
+
+- name: Check if SSL certificates exist
+  stat:
+    path: "{{ item }}"
+  register: ssl_cert_exists
+  loop:
+    - "/etc/nginx/ssl/subtensor_cert.pem"
+    - "/etc/nginx/ssl/subtensor_key.pem"
+
+- name: Generate self-signed SSL certificates
+  block:
+    - name: Generate self-signed certificates with OpenSSL
+      shell: |
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 -sha256 \
+          -keyout /etc/nginx/ssl/subtensor_key.pem \
+          -out /etc/nginx/ssl/subtensor_cert.pem \
+          -subj "/C={{ nginx_cert_country | default('US') }}/ST={{ nginx_cert_state | default('State') }}/L={{ nginx_cert_locality | default('City') }}/O={{ nginx_cert_organization | default('Subtensor Production') }}/CN={{ ansible_host }}"
+      args:
+        creates: /etc/nginx/ssl/subtensor_cert.pem
+
+    - name: Set proper permissions on SSL files
+      file:
+        path: "{{ item }}"
+        owner: root
+        group: root
+        mode: 0600
+      loop:
+        - /etc/nginx/ssl/subtensor_cert.pem
+        - /etc/nginx/ssl/subtensor_key.pem
+  when: >
+    (not nginx_use_custom_ssl_cert | default(false)) and
+    (ssl_cert_exists.results[0].stat is not defined or not ssl_cert_exists.results[0].stat.exists or
+     ssl_cert_exists.results[1].stat is not defined or not ssl_cert_exists.results[1].stat.exists)
+
+- name: Create certificate rotation script
+  template:
+    src: rotate_ssl_cert.sh.j2
+    dest: /usr/local/bin/rotate_subtensor_ssl_cert.sh
+    owner: root
+    group: root
+    mode: 0700
+  when: nginx_auto_rotate_cert | default(true)
+
+- name: Create cron job for yearly certificate rotation
+  cron:
+    name: "Rotate self-signed SSL certificates for Subtensor"
+    special_time: yearly
+    job: "/usr/local/bin/rotate_subtensor_ssl_cert.sh"
+    user: root
+  when: nginx_auto_rotate_cert | default(true)

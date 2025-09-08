@@ -1,0 +1,17 @@
+server {
+    listen 127.0.0.1:8080;
+    server_name localhost;
+
+    location /nginx_status {
+        stub_status on;
+        access_log off;
+        allow 127.0.0.1;
+        deny all;
+    }
+
+    location /health {
+        access_log off;
+        return 200 "healthy\n";
+        add_header Content-Type text/plain;
+    }
+}

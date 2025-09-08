@@ -1,0 +1,23 @@
+[Unit]
+Description=AlertManager
+Documentation=https://prometheus.io/docs/
+After=network-online.target
+
+[Service]
+Type=simple
+User=monitoring
+Group=monitoring
+ExecStart=/usr/local/bin/alertmanager \
+  --config.file={{ monitoring_config_path }}/alertmanager.yml \
+  --storage.path={{ monitoring_data_path }}/alertmanager \
+  --web.listen-address=0.0.0.0:{{ alertmanager_port }} \
+  --web.external-url=http://{{ ansible_host }}:{{ alertmanager_port }}/ \
+  --cluster.listen-address=0.0.0.0:{{ alertmanager_cluster_port }} \
+  --log.level=info
+
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

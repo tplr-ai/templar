@@ -1,0 +1,49 @@
+---
+- name: Install Python3 and venv
+  apt:
+    name:
+      - python3
+      - python3-pip
+      - python3-venv
+    state: present
+    update_cache: yes
+
+- name: Create directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ subtensor_user }}"
+    group: "{{ subtensor_group }}"
+    mode: '0755'
+  loop:
+    - "{{ tools_dir }}"
+    - "{{ tools_venv_dir }}"
+
+- name: Copy tools
+  copy:
+    src: "{{ item }}"
+    dest: "{{ tools_dir }}/"
+    owner: "{{ subtensor_user }}"
+    group: "{{ subtensor_group }}"
+    mode: '0644'
+  loop:
+    - subtensor_admin.py
+    - monitor.py
+    - requirements.txt
+
+- name: Create venv and install deps
+  shell: |
+    python3 -m venv {{ tools_venv_dir }}
+    {{ tools_venv_dir }}/bin/pip install -r {{ tools_dir }}/requirements.txt
+  become_user: "{{ subtensor_user }}"
+  args:
+    creates: "{{ tools_venv_dir }}/bin/activate"
+
+- name: Create command wrappers
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: '0755'
+  loop:
+    - { src: 'subtensor-admin.j2', dest: '/usr/local/bin/subtensor-admin' }
+    - { src: 'subtensor-monitor.j2', dest: '/usr/local/bin/subtensor-monitor' }

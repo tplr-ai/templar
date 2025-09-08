@@ -1,0 +1,65 @@
+global:
+  resolve_timeout: {{ alertmanager_resolve_timeout }}
+
+route:
+  group_by: ['alertname', 'severity']
+  group_wait: {{ notification_settings.group_wait }}
+  group_interval: {{ notification_settings.group_interval }}
+  repeat_interval: {{ notification_settings.repeat_interval }}
+{% if discord_webhook_url and discord_webhook_url != "" %}
+  receiver: 'discord-webhook'
+  routes:
+    - match:
+        severity: critical
+      receiver: 'discord-critical'
+      group_wait: 5s
+      repeat_interval: 1h
+    - match:
+        severity: warning
+      receiver: 'discord-warning'
+      repeat_interval: 4h
+    - match:
+        severity: info
+      receiver: 'discord-info'
+      repeat_interval: 12h
+{% else %}
+  receiver: 'null-receiver'
+{% endif %}
+
+receivers:
+{% if discord_webhook_url and discord_webhook_url != "" %}
+  - name: 'discord-webhook'
+    webhook_configs:
+      - url: '{{ discord_webhook_url }}'
+        send_resolved: true
+
+  - name: 'discord-critical'
+    webhook_configs:
+      - url: '{{ discord_webhook_url }}'
+        send_resolved: true
+
+  - name: 'discord-warning'
+    webhook_configs:
+      - url: '{{ discord_webhook_url }}'
+        send_resolved: true
+
+  - name: 'discord-info'
+    webhook_configs:
+      - url: '{{ discord_webhook_url }}'
+        send_resolved: true
+{% else %}
+  - name: 'null-receiver'
+{% endif %}
+
+inhibit_rules:
+{% for rule in notification_settings.inhibit_rules %}
+  - source_match:
+{% for key, value in rule.source_match.items() %}
+      {{ key }}: '{{ value }}'
+{% endfor %}
+    target_match:
+{% for key, value in rule.target_match.items() %}
+      {{ key }}: '{{ value }}'
+{% endfor %}
+    equal: {{ rule.equal | to_json }}
+{% endfor %}

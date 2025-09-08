@@ -1,0 +1,51 @@
+---
+# Monitoring configuration
+monitoring_enabled: true
+monitoring_base_path: "/opt/monitoring"
+monitoring_data_path: "{{ monitoring_base_path }}/data"
+monitoring_config_path: "{{ monitoring_base_path }}/config"
+
+# Prometheus configuration
+prometheus_version: "2.48.0"
+prometheus_port: 9090
+prometheus_retention: "30d"
+prometheus_scrape_interval: "15s"
+prometheus_evaluation_interval: "15s"
+
+# AlertManager configuration
+alertmanager_version: "0.26.0"
+alertmanager_port: 9093
+alertmanager_cluster_port: 9094
+alertmanager_resolve_timeout: "5m"
+
+# Discord webhook configuration
+discord_webhook_enabled: false
+discord_webhook_url: "{{ vault_discord_webhook_url | default('') }}"
+discord_channel_name: "subtensor-alerts"
+discord_username: "Subtensor Monitor"
+
+# Node monitoring configuration
+node_exporter_version: "1.7.0"
+node_exporter_port: 9100
+
+# Subtensor specific monitoring
+subtensor_monitoring:
+  rpc_health_check_interval: "30s"
+  sync_status_check_interval: "60s"
+  peer_count_threshold: 5
+  block_lag_threshold: 10
+  memory_usage_threshold: 80
+  cpu_usage_threshold: 80
+  disk_usage_threshold: 85
+
+# Notification settings
+notification_settings:
+  repeat_interval: "4h"
+  group_wait: "10s"
+  group_interval: "10s"
+  inhibit_rules:
+    - source_match:
+        severity: "critical"
+      target_match:
+        severity: "warning"
+      equal: ["instance", "alertname"]

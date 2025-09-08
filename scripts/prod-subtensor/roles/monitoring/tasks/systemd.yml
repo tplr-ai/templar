@@ -1,0 +1,20 @@
+---
+- name: Create monitoring systemd services directory
+  file:
+    path: /etc/systemd/system
+    state: directory
+    mode: '0755'
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: yes
+
+- name: Enable monitoring services
+  systemd:
+    name: "{{ item }}"
+    enabled: yes
+  loop:
+    - prometheus
+    - alertmanager
+    - node-exporter
+    - subtensor-monitor

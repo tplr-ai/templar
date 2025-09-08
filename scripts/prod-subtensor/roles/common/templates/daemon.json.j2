@@ -1,0 +1,9 @@
+{
+  {% for key, value in docker_daemon_options.items() %}
+  "{{ key }}": {% if value is mapping %}{
+    {% for subkey, subvalue in value.items() %}
+    "{{ subkey }}": "{{ subvalue }}"{% if not loop.last %},{% endif %}
+    {% endfor %}
+  }{% elif value is string %}"{{ value }}"{% else %}{{ value | to_json }}{% endif %}{% if not loop.last %},{% endif %}
+  {% endfor %}
+}

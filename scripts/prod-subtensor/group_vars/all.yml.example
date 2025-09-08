@@ -1,0 +1,114 @@
+---
+# Global variables
+ansible_user: ubuntu
+ansible_become: true
+
+# System configuration
+timezone: "UTC"
+max_open_files: 65536
+kernel_params:
+  - "net.core.rmem_default = 262144"
+  - "net.core.rmem_max = 16777216"
+  - "net.core.wmem_default = 262144"
+  - "net.core.wmem_max = 16777216"
+  - "net.ipv4.tcp_rmem = 4096 65536 16777216"
+  - "net.ipv4.tcp_wmem = 4096 65536 16777216"
+  - "net.core.netdev_max_backlog = 30000"
+  - "net.ipv4.tcp_max_syn_backlog = 4096"
+
+# Docker configuration
+docker_version: "24.0.7"
+docker_compose_version: "2.21.0"
+docker_daemon_options:
+  log-driver: "json-file"
+  log-opts:
+    max-size: "100m"
+    max-file: "3"
+  storage-driver: "overlay2"
+
+# Subtensor configuration
+subtensor_version: "v3.0.0-amd64"
+subtensor_image: "ghcr.io/opentensor/subtensor"
+subtensor_network: "finney"  # finney for mainnet, test for testnet
+# Chainspec is downloaded from official repo: https://raw.githubusercontent.com/opentensor/subtensor/refs/heads/main/chainspecs/raw_spec_finney.json
+subtensor_chain_spec: "raw_spec_finney.json"
+subtensor_bootnodes: "/dns/bootnode.finney.chain.opentensor.ai/tcp/30333/ws/p2p/12D3KooWRwbMb85RWnT8DSXSYMWQtuDwh4LJzndoRrTDotTR5gDC"
+
+# High availability configuration
+subtensor_replicas: 3
+subtensor_base_path: "/opt/subtensor"
+subtensor_data_dir: "{{ subtensor_base_path }}/data"
+subtensor_logs_dir: "{{ subtensor_base_path }}/logs"
+
+# Port configuration
+subtensor_p2p_port_start: 30333
+subtensor_rpc_port_start: 9933
+subtensor_ws_port_start: 9944
+
+# Resource limits (matching official docker-compose)
+subtensor_cpu_limit: "4"
+subtensor_memory_limit: "40g"
+subtensor_memory_swap_limit: "80g"
+
+# NGINX configuration
+nginx_enabled: true
+nginx_ssl_enabled: true
+nginx_worker_processes: "auto"
+nginx_worker_connections: 4096
+nginx_proxy_connect_timeout: 60
+nginx_proxy_send_timeout: 60
+nginx_proxy_read_timeout: 60
+nginx_client_max_body_size: "10m"
+nginx_proxy_buffers: "32 4k"
+
+# SSL Certificate settings
+nginx_use_custom_ssl_cert: false
+nginx_auto_rotate_cert: true
+nginx_cert_country: "US"
+nginx_cert_state: "State"
+nginx_cert_locality: "City"
+nginx_cert_organization: "Subtensor Production"
+
+# Load balancing configuration
+nginx_upstream_strategy: "least_conn"  # round_robin, least_conn, ip_hash
+nginx_health_check_interval: "30s"
+nginx_health_check_fails: 3
+nginx_health_check_passes: 2
+
+# Security settings
+enable_fail2ban: true
+enable_ufw: true
+ssh_port: 22
+allowed_ssh_users: ["ubuntu"]
+
+# Monitoring and logging
+enable_node_exporter: true
+enable_promtail: false
+log_retention_days: 30
+
+# Backup configuration
+enable_backup: true
+backup_retention_days: 7
+backup_schedule: "0 2 * * *"  # Daily at 2 AM
+backup_storage_path: "{{ subtensor_base_path }}/backups"
+
+# Maintenance settings
+enable_auto_updates: false
+maintenance_window: "02:00-04:00"
+restart_policy: "unless-stopped"
+
+# Monitoring configuration
+monitoring_enabled: true
+discord_webhook_enabled: true
+discord_channel_name: "subtensor-alerts"
+discord_username: "Subtensor Monitor"
+
+# Monitoring thresholds
+subtensor_monitoring:
+  rpc_health_check_interval: "30s"
+  sync_status_check_interval: "60s"
+  peer_count_threshold: 5
+  block_lag_threshold: 10
+  memory_usage_threshold: 80
+  cpu_usage_threshold: 80
+  disk_usage_threshold: 85

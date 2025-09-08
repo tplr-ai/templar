@@ -1,0 +1,52 @@
+---
+- name: Download AlertManager
+  get_url:
+    url: "https://github.com/prometheus/alertmanager/releases/download/v{{ alertmanager_version }}/alertmanager-{{ alertmanager_version }}.linux-amd64.tar.gz"
+    dest: "/tmp/alertmanager-{{ alertmanager_version }}.tar.gz"
+    mode: '0644'
+
+- name: Extract AlertManager
+  unarchive:
+    src: "/tmp/alertmanager-{{ alertmanager_version }}.tar.gz"
+    dest: /tmp
+    remote_src: yes
+    creates: "/tmp/alertmanager-{{ alertmanager_version }}.linux-amd64"
+
+- name: Install AlertManager binaries
+  copy:
+    src: "/tmp/alertmanager-{{ alertmanager_version }}.linux-amd64/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    mode: '0755'
+    owner: root
+    group: root
+    remote_src: yes
+  loop:
+    - alertmanager
+    - amtool
+
+- name: Warn if Discord webhook URL is not set
+  debug:
+    msg: 
+      - "WARNING: Discord webhook URL is not configured"
+      - "AlertManager will start but Discord notifications will not work"
+      - "To enable Discord alerts, set vault_discord_webhook_url in group_vars/vault.yml"
+  when: discord_webhook_url is not defined or discord_webhook_url == ""
+
+- name: Create AlertManager configuration
+  template:
+    src: alertmanager.yml.j2
+    dest: "{{ monitoring_config_path }}/alertmanager.yml"
+    owner: monitoring
+    group: monitoring
+    mode: '0644'
+  notify: restart alertmanager
+
+
+- name: Create AlertManager systemd service
+  template:
+    src: alertmanager.service.j2
+    dest: /etc/systemd/system/alertmanager.service
+    mode: '0644'
+  notify:
+    - reload systemd
+    - restart alertmanager

@@ -1,0 +1,24 @@
+---
+- name: reload systemd
+  systemd:
+    daemon_reload: yes
+
+- name: restart prometheus
+  systemd:
+    name: prometheus
+    state: restarted
+
+- name: restart alertmanager
+  systemd:
+    name: alertmanager
+    state: restarted
+
+- name: restart node-exporter
+  systemd:
+    name: node-exporter
+    state: restarted
+
+- name: restart subtensor-monitor
+  systemd:
+    name: subtensor-monitor
+    state: restarted

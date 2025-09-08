@@ -1,0 +1,85 @@
+#!/bin/bash
+set -euo pipefail
+
+LOG_FILE="{{ subtensor_logs_dir }}/maintenance.log"
+BASE_PATH="{{ subtensor_base_path }}"
+
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+}
+
+show_usage() {
+    cat << EOF
+Usage: $0 [COMMAND] [OPTIONS]
+
+Commands:
+    status          - Show cluster status
+    restart         - Restart all nodes
+    restart-node    - Restart specific node (requires --node)
+    logs            - Show logs (requires --node or --all)
+    backup          - Trigger manual backup
+    health          - Run health check
+    
+Options:
+    --node N        - Specify node number (0-{{ subtensor_replicas | int - 1 }})
+    --all           - Apply to all nodes
+    --force         - Force operation without confirmation
+EOF
+}
+
+show_status() {
+    systemctl is-active subtensor nginx
+    cd "$BASE_PATH" && docker-compose ps
+    [[ -f "$BASE_PATH/status.json" ]] && cat "$BASE_PATH/status.json"
+}
+
+restart_cluster() {
+    local force=${1:-false}
+    [[ "$force" != "true" ]] && { read -p "Restart all nodes? (y/N): " -n 1 -r && echo && [[ ! $REPLY =~ ^[Yy]$ ]] && return 0; }
+    cd "$BASE_PATH" && docker-compose restart && sleep 30 && "$BASE_PATH/scripts/health_check.sh"
+}
+
+restart_node() {
+    local node_id=$1 force=${2:-false}
+    [[ ! "$node_id" =~ ^[0-9]+$ || $node_id -ge {{ subtensor_replicas }} ]] && { echo "Invalid node ID"; exit 1; }
+    [[ "$force" != "true" ]] && { read -p "Restart node $node_id? (y/N): " -n 1 -r && echo && [[ ! $REPLY =~ ^[Yy]$ ]] && return 0; }
+    cd "$BASE_PATH" && docker-compose restart "subtensor-$node_id" && sleep 15 && "$BASE_PATH/scripts/health_check.sh"
+}
+
+show_logs() {
+    local node_id=${1:-"all"}
+    cd "$BASE_PATH"
+    [[ "$node_id" == "all" ]] && docker-compose logs -f || docker-compose logs -f "subtensor-$node_id"
+}
+
+main() {
+    local command=${1:-""}
+    local node_id="" force=false show_all=false
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --node) node_id="$2"; shift 2 ;;
+            --all) show_all=true; shift ;;
+            --force) force=true; shift ;;
+            --help) show_usage; exit 0 ;;
+            *) [[ -z "$command" ]] && command="$1"; shift ;;
+        esac
+    done
+    
+    case "$command" in
+        status) show_status ;;
+        restart) restart_cluster "$force" ;;
+        restart-node) [[ -z "$node_id" ]] && { echo "ERROR: --node required"; exit 1; } || restart_node "$node_id" "$force" ;;
+        logs) 
+            if [[ "$show_all" == "true" ]]; then show_logs "all"
+            elif [[ -n "$node_id" ]]; then show_logs "$node_id"
+            else echo "ERROR: Either --all or --node required"; exit 1
+            fi ;;
+        backup) "$BASE_PATH/scripts/backup.sh" ;;
+        health) "$BASE_PATH/scripts/health_check.sh" ;;
+        "") show_usage; exit 1 ;;
+        *) echo "ERROR: Unknown command: $command"; show_usage; exit 1 ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,129 @@
+version: "3.8"
+
+volumes:
+  node-0-volume:
+  node-1-volume:
+
+networks:
+  subtensor:
+    driver: bridge
+
+services:
+  common: &common
+    image: {{ subtensor_image }}:{{ subtensor_version }}
+    cpu_count: {{ subtensor_cpu_limit }}
+{% if subtensor_memory_limit %}
+    mem_limit: {{ (subtensor_memory_limit | regex_replace('g$', '000000000')) | int }}
+{% endif %}
+{% if subtensor_memory_swap_limit %}
+    memswap_limit: {{ (subtensor_memory_swap_limit | regex_replace('g$', '000000000')) | int }}
+{% endif %}
+    environment:
+      - CARGO_HOME=/var/www/node-subtensor/.cargo
+    restart: {{ restart_policy | default('unless-stopped') }}
+    stop_grace_period: {{ subtensor_stop_grace_period | default('300s') }}
+    networks:
+      - subtensor
+    labels:
+      # Watchtower configuration
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.lifecycle.pre-update=/opt/subtensor/scripts/pre-update.sh"
+      - "com.centurylinklabs.watchtower.lifecycle.post-update=/opt/subtensor/scripts/post-update.sh"
+      - "com.centurylinklabs.watchtower.stop-timeout=300s"
+      - "subtensor.deployment.group={{ watchtower_deployment_group | default('blue') }}"
+      - "subtensor.service.name=subtensor"
+      - "subtensor.health.endpoint=http://localhost:9944/health"
+
+  subtensor-0:
+    <<: *common
+    container_name: subtensor-0
+    ports:
+      - "{{ subtensor_rpc_port_start }}:9933"
+      - "{{ subtensor_ws_port_start }}:9944"
+      - "{{ subtensor_p2p_port_start }}:30333"
+      - "{{ subtensor_metrics_port_start }}:9615"
+    volumes:
+      - node-0-volume:/tmp/blockchain
+    labels:
+      - "subtensor.node.id=0"
+      - "subtensor.node.primary=true"
+      - "com.centurylinklabs.watchtower.depends-on=subtensor-1"
+    command:
+      - /bin/bash
+      - -c
+      - |
+        curl -s {{ subtensor_chainspec_url }} -o /tmp/raw_spec_finney.json && \
+        node-subtensor \
+          --base-path /tmp/blockchain \
+          --chain /tmp/raw_spec_finney.json \
+          --rpc-external --rpc-cors all \
+          --no-mdns \
+          --bootnodes {{ subtensor_bootnodes }} \
+          --sync {{ subtensor_sync_mode }} \
+          --prometheus-external --prometheus-port 9615 \
+          --log {{ subtensor_log_level }}
+
+  subtensor-1:
+    <<: *common
+    container_name: subtensor-1
+    ports:
+      - "{{ subtensor_rpc_port_start | int + 1 }}:9933"
+      - "{{ subtensor_ws_port_start | int + 1 }}:9944"
+      - "{{ subtensor_p2p_port_start | int + 1 }}:30333"
+      - "{{ subtensor_metrics_port_start | int + 1 }}:9615"
+    volumes:
+      - node-1-volume:/tmp/blockchain
+    labels:
+      - "subtensor.node.id=1"
+      - "subtensor.node.primary=false"
+    command:
+      - /bin/bash
+      - -c
+      - |
+        curl -s {{ subtensor_chainspec_url }} -o /tmp/raw_spec_finney.json && \
+        node-subtensor \
+          --base-path /tmp/blockchain \
+          --chain /tmp/raw_spec_finney.json \
+          --rpc-external --rpc-cors all \
+          --no-mdns \
+          --bootnodes {{ subtensor_bootnodes }} \
+          --sync {{ subtensor_sync_mode }} \
+          --prometheus-external --prometheus-port 9615 \
+          --log {{ subtensor_log_level }}
+
+  # Watchtower for automated updates with blue/green strategy
+  watchtower:
+    image: containrrr/watchtower:{{ watchtower_version | default('latest') }}
+    container_name: watchtower
+    restart: unless-stopped
+    networks:
+      - subtensor
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/subtensor/scripts:/scripts:ro
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+      - WATCHTOWER_POLL_INTERVAL={{ watchtower_poll_interval | default(3600) }}
+      - WATCHTOWER_ROLLING_RESTART=true
+      - WATCHTOWER_NOTIFICATIONS=slack
+      - WATCHTOWER_NOTIFICATION_SLACK_HOOK_URL={{ vault_discord_webhook_url }}
+      - WATCHTOWER_NOTIFICATION_SLACK_IDENTIFIER=watchtower-subtensor
+      - WATCHTOWER_NOTIFICATION_SLACK_CHANNEL=#subtensor-alerts
+      - WATCHTOWER_MONITOR_ONLY={{ watchtower_monitor_only | default('false') }}
+      - WATCHTOWER_DEBUG={{ watchtower_debug | default('false') }}
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_LIFECYCLE_HOOKS=true
+      - WATCHTOWER_TIMEOUT=600s
+    command: >
+      --interval {{ watchtower_poll_interval | default(3600) }}
+      --cleanup
+      --rolling-restart
+      --include-restarting
+      --label-enable
+      --notifications slack
+      --notification-slack-hook-url "{{ vault_discord_webhook_url }}"
+      --notification-slack-identifier "watchtower-subtensor"
+      --notification-slack-channel "#subtensor-alerts"
+      {% if watchtower_monitor_only | default('false') == 'true' %}--monitor-only{% endif %}
+      {% if watchtower_debug | default('false') == 'true' %}--debug{% endif %}

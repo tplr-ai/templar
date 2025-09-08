@@ -1,0 +1,21 @@
+[Unit]
+Description=Subtensor Nodes
+Requires=snap.docker.dockerd.service
+After=snap.docker.dockerd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/subtensor
+
+# Use system docker-compose path and handle already running containers gracefully
+ExecStart=/bin/bash -c '/usr/local/bin/docker-compose -f /opt/subtensor/docker-compose.yml up -d || exit 0'
+ExecStop=/usr/local/bin/docker-compose -f /opt/subtensor/docker-compose.yml down
+ExecReload=/usr/local/bin/docker-compose -f /opt/subtensor/docker-compose.yml restart
+
+# Remove restart behavior since Watchtower manages containers
+# Restart=on-failure
+# RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

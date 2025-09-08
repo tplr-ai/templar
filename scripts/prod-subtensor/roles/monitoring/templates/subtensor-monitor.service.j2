@@ -1,0 +1,24 @@
+[Unit]
+Description=Subtensor Node Monitor
+Documentation=Custom Subtensor monitoring service
+After=network-online.target
+
+[Service]
+Type=simple
+User=monitoring
+Group=monitoring
+WorkingDirectory={{ monitoring_base_path }}
+ExecStart={{ monitoring_base_path }}/venv/bin/python {{ monitoring_base_path }}/subtensor_monitor.py
+Environment=PYTHONPATH={{ monitoring_base_path }}
+
+Restart=always
+RestartSec=10
+LimitNOFILE=65536
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=subtensor-monitor
+
+[Install]
+WantedBy=multi-user.target

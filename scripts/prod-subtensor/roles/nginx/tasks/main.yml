@@ -1,0 +1,117 @@
+---
+- name: Install NGINX
+  apt:
+    name: nginx
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+
+- name: Create NGINX configuration directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: 0755
+  loop:
+    - /etc/nginx/conf.d
+    - /etc/nginx/sites-available
+    - /etc/nginx/sites-enabled
+    - /etc/nginx/ssl
+    - /var/log/nginx
+
+- name: Configure NGINX main configuration
+  template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+    mode: 0644
+    backup: yes
+  notify: restart nginx
+
+- name: Configure NGINX for Subtensor load balancing
+  template:
+    src: subtensor.conf.j2
+    dest: /etc/nginx/sites-available/subtensor.conf
+    owner: root
+    group: root
+    mode: 0644
+  notify: restart nginx
+
+- name: Enable Subtensor site
+  file:
+    src: /etc/nginx/sites-available/subtensor.conf
+    dest: /etc/nginx/sites-enabled/subtensor.conf
+    state: link
+  notify: restart nginx
+
+- name: Check if default NGINX site exists
+  stat:
+    path: /etc/nginx/sites-enabled/default
+  register: default_site
+
+- name: Remove default NGINX site
+  file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: restart nginx
+  when: default_site.stat.exists
+
+- name: Generate DH parameters for SSL
+  command: openssl dhparam -out /etc/nginx/ssl/dhparam.pem {{ nginx_ssl_dhparam_bits }}
+  args:
+    creates: /etc/nginx/ssl/dhparam.pem
+  when: nginx_ssl_enabled | default(true)
+
+- name: SSL certificate configuration
+  include_tasks: ssl.yml
+  when: nginx_ssl_enabled | default(true)
+
+- name: Create NGINX status page configuration
+  template:
+    src: status.conf.j2
+    dest: /etc/nginx/conf.d/status.conf
+    owner: root
+    group: root
+    mode: 0644
+  notify: restart nginx
+
+- name: Start and enable NGINX
+  systemd:
+    name: nginx
+    state: started
+    enabled: yes
+
+- name: Test NGINX configuration
+  command: nginx -t
+  register: nginx_test
+  changed_when: false
+  failed_when: nginx_test.rc != 0
+
+- name: Restart NGINX to ensure SSL certificates are loaded
+  systemd:
+    name: nginx
+    state: restarted
+  when: nginx_ssl_enabled | default(true)
+
+- name: Display NGINX configuration test results
+  debug:
+    var: nginx_test.stdout_lines
+
+- name: Verify NGINX is running and listening on port 80
+  wait_for:
+    port: 80
+    host: "0.0.0.0"
+    timeout: 30
+  when: not ansible_check_mode
+
+- name: Verify NGINX is running and listening on port 443
+  wait_for:
+    port: 443
+    host: "0.0.0.0"
+    timeout: 30
+  when:
+    - not ansible_check_mode
+    - nginx_ssl_enabled | default(true)
+  ignore_errors: true

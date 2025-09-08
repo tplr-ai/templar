@@ -285,7 +285,14 @@ class Validator(BaseNode, Trainer):
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
-        self.comms.try_commit(self.wallet, self.bucket)
+
+        # Only master rank tries to commit to avoid multiple attempts
+        if self.is_master:
+            self.comms.try_commit(self.wallet, self.bucket)
+
+        # Ensure all ranks wait for master to complete commit
+        dist_helper.safe_barrier("post_commit", self.local_rank)
+
         # self.comms.fetch_commitments()
 
         # Init state params

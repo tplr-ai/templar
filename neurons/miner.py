@@ -20,6 +20,7 @@
 import argparse
 import asyncio
 import concurrent.futures
+import gc
 import hashlib
 import json
 import os
@@ -511,7 +512,10 @@ class Miner(BaseNode, Trainer):
             n_batches = res["batch_count"]
             window_tokens = res["batch_tokens"]
 
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
             # If training finishes early, wait until the *next* chain-window starts.
+
             if self.current_window == step_window:
                 tplr.logger.info(
                     "Training complete; waiting for window to be exhausted..."
@@ -526,9 +530,16 @@ class Miner(BaseNode, Trainer):
 
             # 1️⃣ every rank builds its momentum shard
             compress_start = tplr.T()
+            self.log_gpu_memory("Before prepare_gradient_dict")
+            torch.cuda.reset_peak_memory_stats(self.device)
+
             shard_gradient, _, _ = tplr.prepare_gradient_dict(
                 self, step_window, null_round
             )
+
+            peak = torch.cuda.max_memory_allocated(self.device) / 1024**3
+            self.log_gpu_memory("After prepare_gradient_dict")
+            tplr.logger.info(f"[GPU] Peak during compression: {peak:.2f} GB")
             compression_time = tplr.T() - compress_start
             tplr.logger.info(
                 f"{tplr.P(step_window, compression_time)} "
@@ -872,8 +883,6 @@ class Miner(BaseNode, Trainer):
 
     async def cleanup_window(self):
         """Aggressive memory cleanup between windows"""
-        import gc
-
         # Clear gradients more thoroughly
         self.model.zero_grad(set_to_none=True)
         self.inner_optimizer.zero_grad(set_to_none=True)

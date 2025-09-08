@@ -53,6 +53,7 @@ from torch.distributed.tensor import distribute_tensor
 import tplr
 from neurons import BaseNode, Trainer
 from neurons.base_node import CPU_COUNT
+from tplr.compress import QuantParamsT
 from tplr.distributed import dist_helper
 
 # GPU optimizations.
@@ -2938,46 +2939,56 @@ class Validator(BaseNode, Trainer):
                     and vals is not None
                     and quant_params is not None
                 ):
-                    if clip_norm:
-                        quant_params = None  # Fast route for decompress
+                    try:
+                        if clip_norm:
+                            quant_params = None  # Fast route for decompress
 
-                    # Check if we're in distributed mode
-                    # Use empty_like to avoid copying the param; just provide dtype/device/shape
-                    ref = torch.empty_like(p, device=self.device, dtype=p.dtype)
+                        # Check if we're in distributed mode
+                        # Use empty_like to avoid copying the param; just provide dtype/device/shape
+                        ref = torch.empty_like(p, device=self.device, dtype=p.dtype)
 
-                    decompressed = self.compressor.decompress(
-                        ref,
-                        idxs,
-                        vals,
-                        self.xshapes[n],
-                        self.totalks[n],
-                        quant_params,
-                    )
+                        decompressed = self.compressor.decompress(
+                            ref,
+                            idxs,
+                            vals,
+                            self.xshapes[n],
+                            self.totalks[n],
+                            cast("QuantParamsT | None", quant_params),
+                        )
 
-                    full_grad_src = self.transformer.decode(
-                        decompressed, use_dct=self.hparams.use_dct
-                    )
-                    # Single conversion to target dtype+device to avoid extra temporaries
-                    full_grad_src = full_grad_src.to(
-                        dtype=p.dtype, device=p.device, non_blocking=True
-                    )
+                        full_grad_src = self.transformer.decode(
+                            decompressed, use_dct=self.hparams.use_dct
+                        )
+                        # Single conversion to target dtype+device to avoid extra temporaries
+                        full_grad_src = full_grad_src.to(
+                            dtype=p.dtype, device=p.device, non_blocking=True
+                        )
 
-                    # Free intermediate pieces ASAP
-                    del ref, decompressed
+                        # Free intermediate pieces ASAP
+                        del ref, decompressed
 
-                    # Final safety check on the gradient itself
-                    if (
-                        torch.isnan(full_grad_src).any()
-                        or torch.isinf(full_grad_src).any()
-                    ):
+                        # Final safety check on the gradient itself
+                        if (
+                            torch.isnan(full_grad_src).any()
+                            or torch.isinf(full_grad_src).any()
+                        ):
+                            tplr.log_with_context(
+                                level="warning",
+                                message=f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                                eval_uid=eval_uid,
+                            )
+                            del full_grad_src
+                            has_valid_gradient = False
+                    except Exception as e:
                         tplr.log_with_context(
-                            level="warning",
-                            message=f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}",
+                            level="error",
+                            message=f"Failed to decompress/decode gradient for {n}: {e}",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
                             eval_uid=eval_uid,
                         )
-                        del full_grad_src
                         has_valid_gradient = False
 
             # Broadcast gradient validity to all ranks immediately

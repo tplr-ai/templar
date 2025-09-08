@@ -54,6 +54,7 @@ from tqdm.auto import tqdm
 from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 
 import tplr
+from tplr.distributed import dist_helper
 
 
 def get_titan_model_args(hparams: SimpleNamespace) -> TransformerModelArgs:
@@ -473,6 +474,68 @@ def initialize_torchtitan_model(
         tplr.logger.info(f"[Model Factory] Initialized {role} model on {device}")
 
     return model
+
+
+def initialize_weights_inplace(
+    model: nn.Module,
+    hparams: SimpleNamespace,
+    world_size: int = 1,
+) -> None:
+    """Initialize weights in-place on an existing model that was created on meta device.
+
+    This function is used when we need to initialize a model that was already created
+    and moved to device but doesn't have weights yet (e.g., when no checkpoint is loaded).
+
+    Args:
+        model: Model that needs weight initialization (already on device)
+        hparams: Hyperparameters object
+        world_size: Number of distributed processes
+    """
+    # Get model arguments
+    titan_args = get_titan_model_args(hparams)
+
+    if dist_helper.is_distributed():
+        if dist_helper.is_master:
+            # Create reference model on CPU for weight initialization
+            with torch.device("meta"):
+                ref = TitanLlama(titan_args)
+                ref.args = titan_args
+            ref.to_empty(device="cpu")
+            torch.manual_seed(42)
+            with torch.no_grad():
+                ref.init_weights()
+            full_sd = get_model_state_dict(
+                ref, options=StateDictOptions(full_state_dict=True)
+            )
+        else:
+            full_sd = {}
+
+        # Broadcast and set weights
+        set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(
+                full_state_dict=True, broadcast_from_rank0=True, strict=True
+            ),
+        )
+        dist_helper.safe_barrier("weight_init", dist_helper.local_rank)
+    else:
+        # Single-process path
+        with torch.device("meta"):
+            ref = TitanLlama(titan_args)
+            ref.args = titan_args
+        ref.to_empty(device="cpu")
+        torch.manual_seed(42)
+        with torch.no_grad():
+            ref.init_weights()
+        full_sd = get_model_state_dict(
+            ref, options=StateDictOptions(full_state_dict=True)
+        )
+        set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(full_state_dict=True, strict=True),
+        )
 
 
 def _get_unwrapped_model(model: nn.Module) -> "TitanLlama":

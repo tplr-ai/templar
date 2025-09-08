@@ -40,6 +40,7 @@ from torch.distributed.tensor import DTensor as DT
 import tplr
 from neurons import BaseNode, Trainer
 from neurons.base_node import CPU_COUNT
+from tplr import model_factory
 from tplr.distributed import dist_helper
 
 # GPU optimizations
@@ -419,8 +420,10 @@ class Miner(BaseNode, Trainer):
         # If no checkpoint was loaded, initialize model weights now
         if not self.model_initialized:
             tplr.logger.info("No checkpoint loaded, initializing model weights...")
-            # Initialize weights using the same deterministic init as model_factory
-            self.init_model(meta=False)
+            # Initialize weights in-place on the existing model
+            model_factory.initialize_weights_inplace(
+                self.model, self.hparams, self.world_size
+            )
             self.model_initialized = True
 
         # Handle catch-up and scheduler replay using consolidated logic

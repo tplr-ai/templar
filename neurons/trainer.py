@@ -207,6 +207,8 @@ class Trainer:
                     weight_decay=adamw_weight_decay,
                     betas=tuple(adamw_config.get("betas", [0.9, 0.95])),
                     eps=adamw_config.get("eps", 1e-8),
+                    fused=True,
+                    foreach=False,
                 )
                 tplr.logger.info(
                     f"[Init] Using AdamW inner optimizer with lr={adamw_lr}, "

@@ -13,7 +13,7 @@ readme = "README.md"
 dynamic = ["version"]
 requires-python = ">=3.11"
 dependencies = [
-    "bittensor==9.1.0",
+    "bittensor>=9.10.1",
     "bt-decode",
     "torch>=2.7.1",
     "boto3",
@@ -60,9 +60,8 @@ dev = [
     "seaborn",
     "ruff",
     "pytest-xdist",
-    "bittensor-cli",
-    "pytest-dotenv"
-
+    "bittensor-cli>=9.11.0",
+    "pytest-dotenv",
 ]
 
 [tool.pytest.ini_options]

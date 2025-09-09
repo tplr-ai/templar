@@ -392,6 +392,91 @@ class Trainer:
 
         return total_loss, n_batches
 
+    # ------------------------------------------------------------------
+    # Optimizer-state offload/prefetch (CPU <-> GPU) for inner optimizer
+    # ------------------------------------------------------------------
+    def _iter_inner_opt_state_tensors(self):
+        """Yield (state_dict, key, tensor) triples for all tensor states of self.inner_optimizer."""
+        opt = getattr(self, "inner_optimizer", None)
+        if opt is None:
+            return
+        state = opt.state
+        # opt.state uses Param tensors as keys; values are dicts with tensors like 'exp_avg', 'exp_avg_sq', etc.
+        for p, s in state.items():
+            if not isinstance(s, dict):
+                continue
+            for k, v in list(s.items()):
+                if torch.is_tensor(v):
+                    yield s, k, v
+
+    def offload_inner_optimizer_states(self, *, log: bool = True) -> None:
+        """
+        Move inner optimizer state tensors (e.g., AdamW exp_avg, exp_avg_sq) to pinned CPU memory.
+        Safe to call after an inner step finishes and before gradient compression.
+        """
+        if not getattr(self.hparams, "offload_optimizer_states", True):
+            return
+        opt = getattr(self, "inner_optimizer", None)
+        if opt is None or getattr(self, "_inner_opt_offloaded", False):
+            return
+        moved_bytes = 0
+        t0 = time.time()
+        # Ensure all GPU kernels are done before D2H copies
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(getattr(self, "device", None))
+        for s, k, v in self._iter_inner_opt_state_tensors():
+            if v.device.type == "cpu":
+                # Pin CPU tensors to speed up subsequent H2D copies (no extra alloc if already pinned)
+                if not v.is_pinned():
+                    s[k] = v.pin_memory()
+                continue
+            # Asynchronous D2H into pinned CPU memory
+            dst = torch.empty_like(v, device="cpu", pin_memory=True)
+            dst.copy_(v, non_blocking=True)
+            s[k] = dst  # drop GPU reference; GC frees it
+            moved_bytes += v.element_size() * v.numel()
+        # Ensure D2H copies complete before we proceed
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(getattr(self, "device", None))
+            torch.cuda.empty_cache()
+        self._inner_opt_offloaded = True
+        if log:
+            tplr.logger.info(
+                "[OptOffload] inner optimizer → CPU pinned | moved ~"
+                f"{moved_bytes / 1e6:.1f} MB in {time.time() - t0:.3f}s"
+            )
+
+    def prefetch_inner_optimizer_states(self, *, log: bool = True) -> None:
+        """
+        Move inner optimizer state tensors back to GPU (device) asynchronously.
+        Call at the very start of inner_steps() before any optimizer.step().
+        """
+        if not getattr(self.hparams, "offload_optimizer_states", True):
+            return
+        opt = getattr(self, "inner_optimizer", None)
+        if opt is None or not getattr(self, "_inner_opt_offloaded", False):
+            return
+        device = getattr(
+            self, "device", torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        moved_bytes = 0
+        t0 = time.time()
+        for s, k, v in self._iter_inner_opt_state_tensors():
+            if v.device == device:
+                continue
+            # Asynchronous H2D copy
+            dst = torch.empty_like(v, device=device)
+            dst.copy_(v, non_blocking=True)
+            s[k] = dst
+            moved_bytes += v.element_size() * v.numel()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+        self._inner_opt_offloaded = False
+        if log:
+            tplr.logger.info(
+                f"[OptOffload] inner optimizer ← GPU {device} | moved ~{moved_bytes / 1e6:.1f} MB in {time.time() - t0:.3f}s"
+            )
+
     async def inner_steps(
         self,
         loader: DataLoader,
@@ -414,6 +499,10 @@ class Trainer:
             self.loop = asyncio.get_running_loop()
             self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
             self.loop.set_default_executor(self.executor)
+
+        # --- Prefetch inner optimizer states back to GPU, if they were offloaded ---
+        # Do this once per window, not per micro-batch.
+        self.prefetch_inner_optimizer_states()
 
         # Initialize profiler if config is available (from BaseNode)
         prof_config = getattr(self, "_prof_config", None)

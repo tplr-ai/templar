@@ -859,9 +859,7 @@ class Validator(BaseNode, Trainer):
         if not self.model_initialized:
             tplr.logger.info("No checkpoint loaded, initializing model weights...")
             # Initialize weights in-place on the existing model
-            model_factory.initialize_weights_inplace(
-                self.model, self.hparams, self.world_size
-            )
+            model_factory.initialize_weights_inplace(self.model, self.hparams)
             self.model_initialized = True
 
         # Handle catch-up and scheduler replay using consolidated logic

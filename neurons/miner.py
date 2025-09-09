@@ -422,9 +422,7 @@ class Miner(BaseNode, Trainer):
         if not self.model_initialized:
             tplr.logger.info("No checkpoint loaded, initializing model weights...")
             # Initialize weights in-place on the existing model
-            model_factory.initialize_weights_inplace(
-                self.model, self.hparams, self.world_size
-            )
+            model_factory.initialize_weights_inplace(self.model, self.hparams)
             self.model_initialized = True
 
         # Handle catch-up and scheduler replay using consolidated logic
@@ -511,6 +509,15 @@ class Miner(BaseNode, Trainer):
             window_entry_loss = res["window_entry_loss"]
             n_batches = res["batch_count"]
             window_tokens = res["batch_tokens"]
+
+            # Free VRAM pressure during compression by offloading inner opt states to CPU
+            # (they are not needed until the next inner_steps call).
+            try:
+                self.offload_inner_optimizer_states()
+            except Exception:
+                tplr.logger.warning(
+                    "Optimizer-state offload failed; continuing.", exc_info=True
+                )
 
             torch.cuda.empty_cache()
             torch.cuda.synchronize()

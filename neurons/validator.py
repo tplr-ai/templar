@@ -837,16 +837,6 @@ class Validator(BaseNode, Trainer):
             f"Using start_window: {self.start_window}, global_step: {self.global_step}"
         )
 
-        current_shard = self.global_step // self.outer_steps_per_shard
-
-        # Initialize datasets (only rank 0 downloads, handled internally by dataset_manager)
-        _ = await self.dataset_manager.initialize_datasets(current_shard)
-
-        # Synchronize all ranks after dataset initialization
-        dist_helper.safe_barrier("dataset_init_complete", self.local_rank)
-
-        self.set_dataloader(validator=True)
-
         # Load checkpoint using consolidated logic
         (
             ckpt_ok,
@@ -866,6 +856,16 @@ class Validator(BaseNode, Trainer):
         await tplr.neurons.handle_checkpoint_catchup(
             self, ckpt_ok, ckpt_sync_win, ckpt_global_step, from_bootstrap
         )
+
+        current_shard = self.global_step // self.outer_steps_per_shard
+
+        # Initialize datasets (only rank 0 downloads, handled internally by dataset_manager)
+        _ = await self.dataset_manager.initialize_datasets(current_shard)
+
+        # Synchronize all ranks after dataset initialization
+        dist_helper.safe_barrier("dataset_init_complete", self.local_rank)
+
+        self.set_dataloader(validator=True)
 
         if self.is_master:
             self.comms.start_commitment_fetcher()

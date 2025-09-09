@@ -387,21 +387,6 @@ class Miner(BaseNode, Trainer):
 
         # global_step tracks actual outer steps performed (starts at 0)
         self.global_step = 0
-        window_offset = self.current_window - (self.start_window or self.current_window)
-        current_shard = window_offset // self.outer_steps_per_shard
-        tplr.logger.info(
-            f"Starting with global_step=0 (actual outer steps), window offset={window_offset}"
-        )
-
-        # Initialize datasets (only rank 0 downloads, handled internally by dataset_manager)
-        _ = await self.dataset_manager.initialize_datasets(current_shard)
-
-        # Synchronize all ranks after dataset initialization
-        dist_helper.safe_barrier("dataset_init_complete", self.local_rank)
-
-        # All workers need to instantiate dataloader
-        self.set_dataloader()
-
         # ------------------------------------------------------------------
         # Proceed to load checkpoint using consolidated logic
         #   • Check if current version checkpoint exists
@@ -431,6 +416,20 @@ class Miner(BaseNode, Trainer):
         )
 
         self.comms.start_commitment_fetcher()
+
+        current_shard = self.global_step // self.outer_steps_per_shard
+        tplr.logger.info(
+            f"Starting with global_step={self.global_step} (actual outer steps)"
+        )
+
+        # Initialize datasets (only rank 0 downloads, handled internally by dataset_manager)
+        _ = await self.dataset_manager.initialize_datasets(current_shard)
+
+        # Synchronize all ranks after dataset initialization
+        dist_helper.safe_barrier("dataset_init_complete", self.local_rank)
+
+        # All workers need to instantiate dataloader
+        self.set_dataloader()
 
         # Put a dummy gradient to mark this miner as active for validators
         if self.is_master:

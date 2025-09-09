@@ -714,7 +714,7 @@ class DCPCheckpointer:
             resp = await s3.list_objects_v2(
                 Bucket=bucket.name,
                 Prefix=prefix,
-                MaxKeys=10,  # Just check for a few files
+                MaxKeys=100,  # Increase to ensure we get all rank files
             )
 
             objects = resp.get("Contents", [])
@@ -723,14 +723,28 @@ class DCPCheckpointer:
 
             # Check for essential files
             has_metadata = any(".metadata" in obj.get("Key", "") for obj in objects)
-            has_shards = any("__0_0.distcp" in obj.get("Key", "") for obj in objects)
             has_sidecar = any(
                 "extra_metadata.json" in obj.get("Key", "") for obj in objects
             )
 
-            return has_metadata and has_shards and has_sidecar
+            # Check that rank files exist for validator world size of 4 (ranks 0-3)
+            has_rank_0 = any("__0_0.distcp" in obj.get("Key", "") for obj in objects)
+            has_rank_1 = any("__1_0.distcp" in obj.get("Key", "") for obj in objects)
+            has_rank_2 = any("__2_0.distcp" in obj.get("Key", "") for obj in objects)
+            has_rank_3 = any("__3_0.distcp" in obj.get("Key", "") for obj in objects)
 
-        except Exception:
+            all_ranks_present = has_rank_0 and has_rank_1 and has_rank_2 and has_rank_3
+
+            if not all_ranks_present:
+                tplr.logger.warning(
+                    f"Checkpoint at window {window} is incomplete. "
+                    f"Ranks present: 0={has_rank_0}, 1={has_rank_1}, 2={has_rank_2}, 3={has_rank_3}"
+                )
+
+            return has_metadata and has_sidecar and all_ranks_present
+
+        except Exception as e:
+            tplr.logger.warning(f"Error checking checkpoint existence: {e}")
             return False
 
     def cleanup_local_checkpoints(self, keep_latest: int = 1) -> None:

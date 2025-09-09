@@ -12,6 +12,7 @@ services:
       - ./logs:/app/logs
       - ./${DATASET_BINS_PATH:-tokenized}:/app/${DATASET_BINS_PATH:-tokenized}
       - ./checkpoints:/app/checkpoints
+      - ./tmp:/tmp
 
     environment:
       - NODE_TYPE=${NODE_TYPE:-miner}

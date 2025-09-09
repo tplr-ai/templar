@@ -266,7 +266,6 @@ class Evaluator:
         # State tracking
         self.evaluated_windows: set[int] = set()
         self.baseline_evaluated = False
-        self.last_discovered_window: int | None = None
         self.start_window: int = 0  # Track start window for global_step calculation
 
         # Initialize or load model
@@ -328,7 +327,6 @@ class Evaluator:
                 self.evaluated_windows.add(
                     local_checkpoint_window
                 )  # Mark as already evaluated
-                self.last_discovered_window = local_checkpoint_window
                 if self.is_master:
                     tplr.logger.info(
                         f"Successfully loaded checkpoint from window {local_checkpoint_window}"
@@ -359,48 +357,39 @@ class Evaluator:
 
     async def check_latest_checkpoint(self) -> int | None:
         """Check for latest checkpoint without downloading."""
-        latest_window = None
+        ready_window: int | None = None
 
-        # Only master rank does the discovery
         if self.is_master:
             try:
-                # Use DCPCheckpointer's discovery method
-                latest_window = await self.ckpt._discover_latest(
-                    prefer_highest_staked=True
-                )
+                candidate = await self.ckpt._discover_latest(prefer_highest_staked=True)
 
-                if latest_window != self.last_discovered_window:
-                    self.last_discovered_window = latest_window
-
-                    if (
-                        latest_window is not None
-                        and latest_window not in self.evaluated_windows
-                    ):
+                # Gate on completeness
+                if candidate is not None and candidate not in self.evaluated_windows:
+                    is_complete = await self.ckpt.check_checkpoint_exists(
+                        window=candidate
+                    )
+                    if is_complete:
+                        tplr.logger.info(f"New checkpoint READY at window {candidate}")
+                        ready_window = candidate
+                    else:
                         tplr.logger.info(
-                            f"New checkpoint discovered at window {latest_window}"
+                            f"Checkpoint pointer found for window {candidate}, "
+                            "but upload not complete yet; will retry."
                         )
             except Exception:
-                tplr.logger.exception(f"Checkpoint discovery")
-                latest_window = None
+                tplr.logger.exception("Checkpoint discovery")
 
-        # Broadcast the result to all ranks
+        # Only broadcast a window if it is READY
+        tensor_val = -1 if ready_window is None else ready_window
         window_tensor = torch.tensor(
-            [latest_window if latest_window is not None else -1],
+            [tensor_val],
             dtype=torch.int32,
             device=self.device if self.device != "cpu" else "cpu",
         )
         dist_helper.broadcast(window_tensor, src=0)
 
-        # Extract the value
-        window_value = int(window_tensor.item())
-        latest_window = window_value if window_value >= 0 else None
-
-        # Update tracking on all ranks
-        if latest_window is not None and latest_window not in self.evaluated_windows:
-            self.last_discovered_window = latest_window
-            return latest_window
-
-        return None
+        value = int(window_tensor.item())
+        return None if value < 0 else value
 
     def save_model_for_eval(self, window: int) -> Path | None:
         """Convert and save model in HuggingFace format."""
@@ -981,13 +970,13 @@ class Evaluator:
             )
 
         # Cleanup old models and checkpoints
-        if len(self.evaluated_windows) > 2:
+        if len(self.evaluated_windows) >= 1:
             if self.is_master:
                 tplr.logger.info(
                     f"[Master] Cleaning up old model caches and checkpoints (keeping latest 1)"
                 )
-            self.model_cache.cleanup(keep_latest=1)
-            self.ckpt.cleanup_local_checkpoints(keep_latest=1)
+                self.model_cache.cleanup(keep_latest=1)
+                self.ckpt.cleanup_local_checkpoints(keep_latest=1)
         return True
 
     async def run(self):

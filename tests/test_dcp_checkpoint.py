@@ -476,3 +476,305 @@ async def test_cleanup_local_checkpoints(tmp_path: Path, monkeypatch):
     )
     # Should not raise, just return early
     ckpt_nonexistent.cleanup_local_checkpoints(keep_latest=1)
+
+
+@pytest.mark.asyncio
+async def test_check_checkpoint_exists_complete(
+    dcp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Test check_checkpoint_exists returns True for complete checkpoint."""
+    from tplr.dcp_checkpoint import DCPCheckpointer
+
+    own = FakeBucket("own-bucket")
+    window = 42
+    version = "test_v1"
+    prefix = f"checkpoints/{version}/{window}/"
+
+    # Complete checkpoint with all rank files for validator world size 4
+    listings = {
+        prefix: [
+            (f"{prefix}.metadata", 100),
+            (f"{prefix}extra_metadata.json", 200),
+            (f"{prefix}__0_0.distcp", 1000),
+            (f"{prefix}__1_0.distcp", 1000),
+            (f"{prefix}__2_0.distcp", 1000),
+            (f"{prefix}__3_0.distcp", 1000),
+            (f"{prefix}some_other_file.pt", 500),
+        ]
+    }
+
+    comms = FakeComms(
+        own_bucket=own,
+        repo_root=tmp_path,
+        s3_listings=listings,
+    )
+
+    set_dist(monkeypatch, dcp, rank=0, world=1)
+    ckpt = DCPCheckpointer(comms, uid=1, version=version, repo_root=tmp_path)
+
+    result = await ckpt.check_checkpoint_exists(
+        window=window, prefer_highest_staked=False
+    )
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_check_checkpoint_exists_missing_metadata(
+    dcp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Test check_checkpoint_exists returns False when metadata is missing."""
+    from tplr.dcp_checkpoint import DCPCheckpointer
+
+    own = FakeBucket("own-bucket")
+    window = 42
+    version = "test_v1"
+    prefix = f"checkpoints/{version}/{window}/"
+
+    # Missing .metadata file
+    listings = {
+        prefix: [
+            (f"{prefix}extra_metadata.json", 200),
+            (f"{prefix}__0_0.distcp", 1000),
+            (f"{prefix}__1_0.distcp", 1000),
+            (f"{prefix}__2_0.distcp", 1000),
+            (f"{prefix}__3_0.distcp", 1000),
+        ]
+    }
+
+    comms = FakeComms(
+        own_bucket=own,
+        repo_root=tmp_path,
+        s3_listings=listings,
+    )
+
+    set_dist(monkeypatch, dcp, rank=0, world=1)
+    ckpt = DCPCheckpointer(comms, uid=1, version=version, repo_root=tmp_path)
+
+    result = await ckpt.check_checkpoint_exists(
+        window=window, prefer_highest_staked=False
+    )
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_check_checkpoint_exists_missing_sidecar(
+    dcp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Test check_checkpoint_exists returns False when sidecar is missing."""
+    from tplr.dcp_checkpoint import DCPCheckpointer
+
+    own = FakeBucket("own-bucket")
+    window = 42
+    version = "test_v1"
+    prefix = f"checkpoints/{version}/{window}/"
+
+    # Missing extra_metadata.json
+    listings = {
+        prefix: [
+            (f"{prefix}.metadata", 100),
+            (f"{prefix}__0_0.distcp", 1000),
+            (f"{prefix}__1_0.distcp", 1000),
+            (f"{prefix}__2_0.distcp", 1000),
+            (f"{prefix}__3_0.distcp", 1000),
+        ]
+    }
+
+    comms = FakeComms(
+        own_bucket=own,
+        repo_root=tmp_path,
+        s3_listings=listings,
+    )
+
+    set_dist(monkeypatch, dcp, rank=0, world=1)
+    ckpt = DCPCheckpointer(comms, uid=1, version=version, repo_root=tmp_path)
+
+    result = await ckpt.check_checkpoint_exists(
+        window=window, prefer_highest_staked=False
+    )
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_check_checkpoint_exists_incomplete_ranks(
+    dcp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Test check_checkpoint_exists returns False when rank files are incomplete."""
+    from tplr.dcp_checkpoint import DCPCheckpointer
+
+    own = FakeBucket("own-bucket")
+    window = 42
+    version = "test_v1"
+    prefix = f"checkpoints/{version}/{window}/"
+
+    # Missing rank 2 file
+    listings = {
+        prefix: [
+            (f"{prefix}.metadata", 100),
+            (f"{prefix}extra_metadata.json", 200),
+            (f"{prefix}__0_0.distcp", 1000),
+            (f"{prefix}__1_0.distcp", 1000),
+            # rank 2 missing
+            (f"{prefix}__3_0.distcp", 1000),
+        ]
+    }
+
+    comms = FakeComms(
+        own_bucket=own,
+        repo_root=tmp_path,
+        s3_listings=listings,
+    )
+
+    set_dist(monkeypatch, dcp, rank=0, world=1)
+    ckpt = DCPCheckpointer(comms, uid=1, version=version, repo_root=tmp_path)
+
+    result = await ckpt.check_checkpoint_exists(
+        window=window, prefer_highest_staked=False
+    )
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_check_checkpoint_exists_empty_directory(
+    dcp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Test check_checkpoint_exists returns False for empty directory."""
+    from tplr.dcp_checkpoint import DCPCheckpointer
+
+    own = FakeBucket("own-bucket")
+    window = 42
+    version = "test_v1"
+    prefix = f"checkpoints/{version}/{window}/"
+
+    # Empty directory
+    listings = {prefix: []}
+
+    comms = FakeComms(
+        own_bucket=own,
+        repo_root=tmp_path,
+        s3_listings=listings,
+    )
+
+    set_dist(monkeypatch, dcp, rank=0, world=1)
+    ckpt = DCPCheckpointer(comms, uid=1, version=version, repo_root=tmp_path)
+
+    result = await ckpt.check_checkpoint_exists(
+        window=window, prefer_highest_staked=False
+    )
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_check_checkpoint_exists_with_highest_staked(
+    dcp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Test check_checkpoint_exists works with highest-staked validator's bucket."""
+    from tplr.dcp_checkpoint import DCPCheckpointer
+
+    own = FakeBucket("own-bucket")
+    top = FakeBucket("top-bucket")
+    window = 42
+    version = "test_v1"
+    prefix = f"checkpoints/{version}/{window}/"
+
+    # Complete checkpoint
+    listings = {
+        prefix: [
+            (f"{prefix}.metadata", 100),
+            (f"{prefix}extra_metadata.json", 200),
+            (f"{prefix}__0_0.distcp", 1000),
+            (f"{prefix}__1_0.distcp", 1000),
+            (f"{prefix}__2_0.distcp", 1000),
+            (f"{prefix}__3_0.distcp", 1000),
+        ]
+    }
+
+    comms = FakeComms(
+        own_bucket=own,
+        top_bucket=top,
+        repo_root=tmp_path,
+        s3_listings=listings,
+    )
+
+    set_dist(monkeypatch, dcp, rank=0, world=1)
+    ckpt = DCPCheckpointer(comms, uid=1, version=version, repo_root=tmp_path)
+
+    # Should use top bucket when prefer_highest_staked=True
+    result = await ckpt.check_checkpoint_exists(
+        window=window, prefer_highest_staked=True
+    )
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_check_checkpoint_exists_handles_exception(
+    dcp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Test check_checkpoint_exists handles exceptions gracefully."""
+    from tplr.dcp_checkpoint import DCPCheckpointer
+
+    own = FakeBucket("own-bucket")
+    window = 42
+    version = "test_v1"
+
+    class FailingS3:
+        async def list_objects_v2(self, **kwargs):
+            raise RuntimeError("S3 connection failed")
+
+    class FailingComms(FakeComms):
+        async def _get_s3_client(self, _):
+            return FailingS3()
+
+    comms = FailingComms(
+        own_bucket=own,
+        repo_root=tmp_path,
+    )
+
+    set_dist(monkeypatch, dcp, rank=0, world=1)
+    ckpt = DCPCheckpointer(comms, uid=1, version=version, repo_root=tmp_path)
+
+    # Should return False on exception
+    result = await ckpt.check_checkpoint_exists(
+        window=window, prefer_highest_staked=False
+    )
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_check_checkpoint_exists_multiple_metadata_files(
+    dcp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Test check_checkpoint_exists handles multiple metadata files correctly."""
+    from tplr.dcp_checkpoint import DCPCheckpointer
+
+    own = FakeBucket("own-bucket")
+    window = 42
+    version = "test_v1"
+    prefix = f"checkpoints/{version}/{window}/"
+
+    # Multiple metadata files (e.g., app.metadata, optimizer.metadata)
+    listings = {
+        prefix: [
+            (f"{prefix}.metadata", 100),
+            (f"{prefix}app.metadata", 100),
+            (f"{prefix}optimizer.metadata", 100),
+            (f"{prefix}extra_metadata.json", 200),
+            (f"{prefix}__0_0.distcp", 1000),
+            (f"{prefix}__1_0.distcp", 1000),
+            (f"{prefix}__2_0.distcp", 1000),
+            (f"{prefix}__3_0.distcp", 1000),
+        ]
+    }
+
+    comms = FakeComms(
+        own_bucket=own,
+        repo_root=tmp_path,
+        s3_listings=listings,
+    )
+
+    set_dist(monkeypatch, dcp, rank=0, world=1)
+    ckpt = DCPCheckpointer(comms, uid=1, version=version, repo_root=tmp_path)
+
+    result = await ckpt.check_checkpoint_exists(
+        window=window, prefer_highest_staked=False
+    )
+    assert result is True

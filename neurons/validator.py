@@ -1044,7 +1044,7 @@ class Validator(BaseNode, Trainer):
                     reserve_uids=self.comms.reserve_peers,
                     window=self.sync_window,
                     key="gradient",
-                    timeout=75,
+                    timeout=90,
                     device=cast(str, self.device),
                     local=False,
                     totalks=self.totalks,

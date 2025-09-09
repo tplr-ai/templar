@@ -76,6 +76,9 @@ def get_titan_model_args(hparams: SimpleNamespace) -> TransformerModelArgs:
         if hasattr(hparams, "tokenizer")
         else hparams.model_config.vocab_size
     )
+    # Get tie_embeddings from torchtitan config, default to True for backward compatibility
+    tt = getattr(hparams, "torchtitan", SimpleNamespace())
+    tie_embeddings = getattr(tt, "tie_embeddings", True)
 
     if model_size in llama3_configs:
         tplr.logger.info(f"Using predefined TorchTitan config for {model_size}")
@@ -85,6 +88,7 @@ def get_titan_model_args(hparams: SimpleNamespace) -> TransformerModelArgs:
         args.max_seq_len = sequence_length
         # Update vocab_size if provided (from tokenizer)
         args.vocab_size = vocab_size
+        args.tie_embeddings = tie_embeddings
         tplr.logger.info(f"Using vocab_size: {vocab_size}")
         return args
 
@@ -107,6 +111,7 @@ def get_titan_model_args(hparams: SimpleNamespace) -> TransformerModelArgs:
         norm_eps=getattr(hparams.model_config, "rms_norm_eps", 1e-5),
         rope_theta=getattr(hparams.model_config, "rope_theta", 10000.0),
         max_seq_len=sequence_length,
+        tie_embeddings=tie_embeddings,
     )
 
     # Calculate ffn_dim_multiplier to match the intermediate_size from hparams

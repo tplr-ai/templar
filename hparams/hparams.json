@@ -95,6 +95,8 @@
     "enable_compiled_autograd": false,
 
     "float8_recipe_name": null,
+    
+    "tie_embeddings": true,
 
     "activation_checkpoint": {
       "mode": "selective",

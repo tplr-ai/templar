@@ -527,11 +527,6 @@ class Trainer:
         local_tokens_sum: int = 0  # local running totals
         local_loss_sum: float = 0.0
 
-        offload_start = time.time()
-        params_offloaded, param_specs = dist_helper.get_offloaded_params(self.model)
-        offload_time = time.time() - offload_start
-        tplr.logger.info(f"Parameter offload to CPU took {offload_time:.4f}s")
-
         inner_step_count: int = 0
         loader_iter = iter(loader)
 
@@ -727,19 +722,8 @@ class Trainer:
 
             await asyncio.sleep(0)
 
-            # ------------------------------------------------------------------ #
-            # 6. parameter offloading logic
-            # ------------------------------------------------------------------ #
-            with tp.record_function("Parameter Offloading") if prof else nullcontext():
-                restore_start = time.time()
-                dist_helper.restore_offloaded_params(
-                    self.model, params_offloaded, param_specs
-                )
-                restore_time = time.time() - restore_start
-                tplr.logger.info(f"Parameter restore to GPU took {restore_time:.4f}s")
-
         # ---------------------------------------------------------------------- #
-        # 7. Return aggregated metrics
+        # 6. Return aggregated metrics
         # ---------------------------------------------------------------------- #
         batch_count = int(dist_helper.ddp_reduce(batch_count, device=self.device))
         return {

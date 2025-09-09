@@ -489,6 +489,12 @@ class Miner(BaseNode, Trainer):
                 f"{tplr.P(step_window, data_loading_time)} Loaded training data"
             )
 
+            # Offload parameters to CPU before inner_steps
+            offload_start = time.time()
+            params_offloaded, param_specs = dist_helper.get_offloaded_params(self.model)
+            offload_time = time.time() - offload_start
+            tplr.logger.info(f"Parameter offload to CPU took {offload_time:.4f}s")
+
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
             # Check if we're in a null round (warmup phase)
@@ -502,9 +508,19 @@ class Miner(BaseNode, Trainer):
                 )
             else:
                 tplr.logger.info("Start accumulating...")
+
             res = await self.inner_steps(
                 loader=self.loader, step_window=step_window, null_round=null_round
             )
+
+            # Restore parameters from CPU after inner_steps
+            restore_start = time.time()
+            dist_helper.restore_offloaded_params(
+                self.model, params_offloaded, param_specs
+            )
+            restore_time = time.time() - restore_start
+            tplr.logger.info(f"Parameter restore to GPU took {restore_time:.4f}s")
+
             training_time = tplr.T() - train_start
             window_entry_loss = res["window_entry_loss"]
             n_batches = res["batch_count"]

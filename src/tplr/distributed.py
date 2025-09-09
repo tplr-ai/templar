@@ -20,6 +20,8 @@ Distributed training utilities for multi-GPU training.
 """
 
 import os
+import time
+from contextlib import nullcontext
 from datetime import timedelta
 from typing import Any
 
@@ -286,71 +288,201 @@ class DistributedHelper:
 
         return result
 
-    def get_offloaded_params(self, model: torch.nn.Module) -> tuple[list, list]:
+    def _model_device(self, model: torch.nn.Module) -> torch.device:
+        return next(model.parameters()).device
+
+    def _get_offload_stream(self, model: torch.nn.Module):
+        if not torch.cuda.is_available():
+            return None
+        stream = getattr(model, "_offload_stream", None)
+        if stream is None:
+            # One dedicated stream per model instance, *on the model's device*
+            stream = torch.cuda.Stream(device=self._model_device(model))
+            setattr(model, "_offload_stream", stream)
+        return stream
+
+    def get_offloaded_params(self, model: torch.nn.Module) -> tuple:
         """
-        Get a copy of current parameters and offload them to CPU.
+        Snapshot current parameters into *reusable pinned CPU buffers* with async D2H copies.
 
-        Args:
-            model: Model to offload parameters from
-
-        Returns:
-            Tuple of (offloaded_params, param_specs) for restoration
+        Returns
+        -------
+        (params_offloaded, param_specs)
+            params_offloaded: list of CPU tensors (pinned) that hold the saved local shard
+            param_specs: metadata for DTensor recreation at restore time
         """
         params_offloaded = []
         param_info = []
 
-        for param in model.parameters():
-            if isinstance(param, DT):
-                # Get the local TP shard and store the spec
-                local_param = param.to_local()
-                params_offloaded.append(local_param.detach().clone().to("cpu"))
-                param_info.append(
-                    {
-                        "is_dtensor": True,
-                        "device_mesh": param.device_mesh,
-                        "placements": param.placements,
-                        "local_shape": local_param.shape,
-                    }
-                )
-            else:
-                # For regular tensors
-                params_offloaded.append(param.data.detach().clone().to("cpu"))
-                param_info.append({"is_dtensor": False})
+        # Use a dedicated stream to let D2H issue asynchronously; we fence before returning.
+        stream = self._get_offload_stream(model)
+
+        t0 = time.time()
+        # Launch all copies on the offload stream
+        if stream is not None:
+            stream.wait_stream(torch.cuda.current_stream())
+
+        with torch.inference_mode():
+            ctx = torch.cuda.stream(stream) if stream is not None else nullcontext()
+            with ctx:
+                for p in model.parameters():
+                    # Source (local shard or regular tensor)
+                    if isinstance(p, DT):
+                        src_local = p.to_local()
+                        cpu_buf = getattr(p, "_cpu_offload_buf", None)
+                        if (
+                            cpu_buf is None
+                            or cpu_buf.shape != src_local.shape
+                            or cpu_buf.dtype != src_local.dtype
+                            or cpu_buf.device.type != "cpu"
+                        ):
+                            # Reuse a single pinned buffer per param across windows
+                            cpu_buf = torch.empty_like(
+                                src_local, device="cpu", pin_memory=True
+                            )
+                            setattr(p, "_cpu_offload_buf", cpu_buf)
+                        cpu_buf.copy_(
+                            src_local, non_blocking=True
+                        )  # async D2H into pinned memory
+                        params_offloaded.append(cpu_buf)
+                        param_info.append(
+                            {
+                                "is_dtensor": True,
+                                "device_mesh": p.device_mesh,
+                                "placements": p.placements,
+                                # (local shape kept for sanity)
+                                "local_shape": src_local.shape,
+                                "dtype": str(src_local.dtype).replace("torch.", ""),
+                            }
+                        )
+                    else:
+                        # Regular (non-DTensor) parameter
+                        src = (
+                            p if isinstance(p, torch.Tensor) else p.data
+                        )  # Parameter is Tensor subclass
+                        cpu_buf = getattr(p, "_cpu_offload_buf", None)
+                        if (
+                            cpu_buf is None
+                            or cpu_buf.shape != src.shape
+                            or cpu_buf.dtype != src.dtype
+                            or cpu_buf.device.type != "cpu"
+                        ):
+                            cpu_buf = torch.empty_like(
+                                src, device="cpu", pin_memory=True
+                            )
+                            setattr(p, "_cpu_offload_buf", cpu_buf)
+                        cpu_buf.copy_(src, non_blocking=True)
+                        params_offloaded.append(cpu_buf)
+                        param_info.append(
+                            {
+                                "is_dtensor": False,
+                                "dtype": str(src.dtype).replace("torch.", ""),
+                            }
+                        )
+
+        # Fence: ensure snapshot is complete and visible
+        if stream is not None:
+            torch.cuda.current_stream().wait_stream(stream)
+            stream.synchronize()
+
+        tplr.logger.info(
+            f"[ParamOffload] snap {len(params_offloaded)} params in {time.time() - t0:.3f}s"
+        )
 
         return params_offloaded, param_info
 
     def restore_offloaded_params(
-        self, model: torch.nn.Module, params_offloaded: list, param_specs: list
+        self,
+        model: torch.nn.Module,
+        params_offloaded: list,
+        param_specs: list,
     ) -> None:
         """
-        Restore offloaded parameters back to the model.
+        Efficiently compute param deltas and restore weights without extra GPU temporaries.
 
-        Args:
-            model: Model to restore parameters to
-            params_offloaded: List of offloaded parameters
-            param_specs: List of parameter specifications
+        For each parameter p and saved CPU buffer B:
+          1) Put B into the *grad storage* (local GPU tensor or DTensor), non_blocking.
+          2) Compute Δ = B - p  in-place (Δ lives where grad lives).
+          3) Restore params by   p += Δ   (which is equivalent to p ← B).
+          4) Leave p.grad = Δ   for your compression stage.
+
+        For DTensors, p.grad is created as a DTensor over the same mesh/placements
+        (so your GFULL path in prepare_gradient_dict keeps working).
         """
-        with torch.no_grad():
-            for (saved_param, param_meta), p in zip(
-                zip(params_offloaded, param_specs), model.parameters()
-            ):
-                if param_meta["is_dtensor"] and isinstance(p, DT):
-                    # Handle TP DTensors
-                    saved_param = saved_param.to(p.device, non_blocking=True)
+        stream = self._get_offload_stream(model)
 
-                    # Create a DTensor from the local shard directly
-                    saved_param_dtensor = DT.from_local(
-                        saved_param,
-                        device_mesh=param_meta["device_mesh"],
-                        placements=param_meta["placements"],
-                        run_check=False,
-                    )
-                    p.grad = saved_param_dtensor - p
-                    p.data.copy_(saved_param_dtensor.data)
-                else:
-                    saved_param = saved_param.to(p.device, non_blocking=True)
-                    p.grad = saved_param - p.data
-                    p.data.copy_(saved_param)
+        if stream is not None:
+            stream.wait_stream(torch.cuda.current_stream())
+
+        t0 = time.time()
+        with torch.no_grad():
+            ctx = torch.cuda.stream(stream) if stream is not None else nullcontext()
+            with ctx:
+                it = zip(zip(params_offloaded, param_specs), model.parameters())
+                for (saved_cpu, meta), p in it:
+                    if isinstance(p, DT) and meta.get("is_dtensor", False):
+                        # Stage into p.grad's *own* storage so it is freed by zero_grad(set_to_none=True)
+                        local = p.to_local()
+                        # If p.grad is already a DTensor with matching sharding, reuse its local storage.
+                        grad_dt: DT | None = None
+                        if isinstance(p.grad, DT):
+                            try:
+                                g_loc = p.grad.to_local()
+                                if (
+                                    g_loc.shape == local.shape
+                                    and g_loc.dtype == local.dtype
+                                    and g_loc.device == local.device
+                                ):
+                                    # Reuse existing grad local buffer
+                                    g_loc.copy_(saved_cpu, non_blocking=True)
+                                    grad_dt = p.grad  # reuse wrapper
+                                else:
+                                    p.grad = None  # drop mismatched buffer
+                            except Exception:
+                                p.grad = None
+                        if grad_dt is None:
+                            # Fresh local staging owned by p.grad
+                            g_loc = torch.empty_like(local, device=local.device)
+                            g_loc.copy_(saved_cpu, non_blocking=True)
+                            grad_dt = DT.from_local(
+                                g_loc,
+                                device_mesh=meta["device_mesh"],
+                                placements=meta["placements"],
+                                run_check=False,
+                            )
+                            p.grad = grad_dt
+
+                        # Δ = saved - current (in-place on p.grad's storage)
+                        grad_dt.sub_(p)
+                        # p ← p + Δ  (now equals saved)
+                        p.data.add_(grad_dt)
+                    else:
+                        # Non-DTensor path
+                        tensor = p if isinstance(p, torch.Tensor) else p.data
+                        # Ensure we have a GPU grad buffer to stage 'saved'
+                        if (
+                            p.grad is None
+                            or p.grad.shape != tensor.shape
+                            or p.grad.device != tensor.device
+                        ):
+                            p.grad = torch.empty_like(tensor, device=tensor.device)
+
+                        # H2D copy saved -> p.grad (non_blocking)
+                        p.grad.copy_(saved_cpu, non_blocking=True)
+
+                        # Δ = saved - current (in-place on p.grad)
+                        p.grad.sub_(tensor)
+
+                        # Restore params: p = p + Δ  (== saved)
+                        tensor.add_(p.grad)
+
+        if stream is not None:
+            torch.cuda.current_stream().wait_stream(stream)
+            stream.synchronize()
+
+        tplr.logger.info(
+            f"[ParamRestore] restored {len(params_offloaded)} params in {time.time() - t0:.3f}s"
+        )
 
 
 # Global instance for convenience

@@ -97,20 +97,20 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
     else:
         model_iterator = miner.model.named_parameters()
 
+    # Build params dict once to avoid repeated iteration
+    params_dict = dict(miner.model.named_parameters())
+
     # Batch load all error feedback tensors to GPU
     for n in miner.owned_params:
         if miner.error_feedback.get(n, None) is not None:
             if miner.error_feedback[n].is_cuda:
                 continue
             # Get the device from the corresponding parameter
-            param = dict(miner.model.named_parameters()).get(n)
+            param = params_dict.get(n)
             if param is not None:
                 miner.error_feedback[n] = miner.error_feedback[n].to(
                     param.device, non_blocking=True
                 )
-    # Synchronize to ensure all transfers complete
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
 
     for _, (n, p) in enumerate(model_iterator, 1):
         owned = n in miner.owned_params
@@ -131,19 +131,9 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
             assert g is not None, f"p.grad is None for {n}"
             grad_full = g.to(p.device)
 
-        # --- 2) Param full_tensor rendezvous (PFULL) for DT params ---
-        full_p = None
-        if p_is_dt:
-            grp_p = get_mesh_group(p)
-            barrier(grp_p)
-            assert isinstance(p, DT)
-            full_p = p.full_tensor().to(p.device)
-            barrier(grp_p)
-
-        # Non-owners: after participating in collectives, drop grad and continue.
+        # Non-owners: after participating in grad collective, drop grad and continue.
         if not owned:
             p.grad = None
-            full_p = None
             continue
 
         # --- 3) Momentum buffer update (owner only) ---
@@ -171,15 +161,10 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
         del encoded
 
         # --- 5) Decompress reference (owner only) ---
-        if p_is_dt:
-            assert full_p is not None
-            decompressed = miner.compressor.decompress(
-                full_p, idxs, vals, xshape, totalk, quant_params
-            )
-        else:
-            decompressed = miner.compressor.decompress(
-                p, idxs, vals, xshape, totalk, quant_params
-            )
+        # Pass p directly - decompress only uses p.device and p.dtype
+        decompressed = miner.compressor.decompress(
+            p, idxs, vals, xshape, totalk, quant_params
+        )
 
         # --- 6) Decode & error-feedback update (owner only) ---
         transmit_grad = miner.transformer.decode(decompressed, use_dct=use_dct)
@@ -188,11 +173,28 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
         # Keep error feedback on GPU for now, batch offload later
         miner.error_feedback[n] = error_feedback
         del transmit_grad, error_feedback
-        full_p = None
 
-        # --- 7) Pack outputs (move compressed artifacts to CPU) ---
-        gradient[n + "idxs"] = idxs.cpu() if isinstance(idxs, torch.Tensor) else idxs
-        gradient[n + "vals"] = vals.cpu() if isinstance(vals, torch.Tensor) else vals
+        # --- 7) Pack outputs (move compressed artifacts to CPU asynchronously) ---
+        # Using non_blocking=True for async D2H transfers when CUDA is available
+        if isinstance(idxs, torch.Tensor):
+            if torch.cuda.is_available():
+                cpu_idxs = torch.empty_like(idxs, device="cpu", pin_memory=True)
+                cpu_idxs.copy_(idxs, non_blocking=True)
+                gradient[n + "idxs"] = cpu_idxs
+            else:
+                gradient[n + "idxs"] = idxs.cpu()
+        else:
+            gradient[n + "idxs"] = idxs
+
+        if isinstance(vals, torch.Tensor):
+            if torch.cuda.is_available():
+                cpu_vals = torch.empty_like(vals, device="cpu", pin_memory=True)
+                cpu_vals.copy_(vals, non_blocking=True)
+                gradient[n + "vals"] = cpu_vals
+            else:
+                gradient[n + "vals"] = vals.cpu()
+        else:
+            gradient[n + "vals"] = vals
         gradient[n + "quant_params"] = quant_params
         xshapes[n] = xshape
         totalks[n] = totalk
@@ -212,10 +214,9 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
             )
             miner.error_feedback[name] = miner.error_feedback_cpu_buffers[name]
 
+    # Single synchronization at the end for all async operations
     if torch.cuda.is_available():
         torch.cuda.synchronize()
-
-    if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gradient["metadata"] = {"window": step_window}
     return gradient, xshapes, totalks

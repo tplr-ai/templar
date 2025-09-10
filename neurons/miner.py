@@ -538,11 +538,6 @@ class Miner(BaseNode, Trainer):
             torch.cuda.synchronize()
             # If training finishes early, wait until the *next* chain-window starts.
 
-            if self.current_window == step_window:
-                tplr.logger.info(
-                    "Training complete; waiting for window to be exhausted..."
-                )
-                await self.wait_until_window(step_window + 1)
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - train_start)} Completed training"
             )
@@ -616,6 +611,22 @@ class Miner(BaseNode, Trainer):
                     for k, v in gradient.items()
                 }
 
+            else:
+                # non-master ranks simply wait; they don't upload
+                put_time = 0.0
+                if self.world_size > 1:
+                    del gathered  # Free gathered list on non-master ranks too
+
+            tplr.logger.info(f"Stopped accumulating: {n_batches} batches")
+            dist_helper.safe_barrier("post_gather", self.local_rank)
+
+            if self.current_window == step_window:
+                tplr.logger.info(
+                    "Training complete; waiting for window to be exhausted..."
+                )
+                await self.wait_until_window(step_window + 1)
+
+            if self.is_master:
                 put_start = tplr.T()
                 await self.comms.put(
                     state_dict=processed_state_dict,
@@ -641,15 +652,6 @@ class Miner(BaseNode, Trainer):
                 del processed_state_dict
                 del gradient
                 torch.cuda.empty_cache()
-
-            else:
-                # non-master ranks simply wait; they don't upload
-                put_time = 0.0
-                if self.world_size > 1:
-                    del gathered  # Free gathered list on non-master ranks too
-
-            tplr.logger.info(f"Stopped accumulating: {n_batches} batches")
-            dist_helper.safe_barrier("post_gather", self.local_rank)
 
             sync_block = self.current_window * self.hparams.blocks_per_window
             ts_value = await self.loop.run_in_executor(

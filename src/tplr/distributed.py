@@ -210,6 +210,66 @@ class DistributedHelper:
                 tplr.logger.error(f"[sync:{tag}] all_reduce failed: {e}")
             return False
 
+    def any_ok(self, ok: bool, device: torch.device, tag: str = "") -> bool:
+        """
+        Group-wide MAX-reduce on a 1/0 flag: returns True if any rank reported ok=True.
+        Never raises; logs and returns False if collectives fail.
+
+        Args:
+            ok: Local flag value
+            device: Device for synchronization
+            tag: Optional tag for logging
+
+        Returns:
+            True if any rank reported ok=True
+        """
+        if not self.is_distributed():
+            return ok
+
+        try:
+            t = torch.tensor([1 if ok else 0], dtype=torch.int32, device=device)
+            dist.all_reduce(t, op=dist.ReduceOp.MAX)
+            out = bool(t.item())
+            if out and self.is_master and tag:
+                tplr.logger.info(f"[sync:{tag}] at least one rank reported True")
+            return out
+        except Exception as e:
+            if tag:
+                tplr.logger.error(f"[sync:{tag}] all_reduce failed: {e}")
+            return False
+
+    def all_agree(self, agree: bool, device: torch.device, tag: str = "") -> bool:
+        """
+        Group-wide AND operation: returns True only if ALL ranks reported agree=True.
+        If any rank reports agree=False, returns False.
+        Never raises; logs and returns the local value if collectives fail.
+
+        Args:
+            agree: Local flag value (True if this rank agrees with the condition)
+            device: Device for synchronization
+            tag: Optional tag for logging
+
+        Returns:
+            True only if ALL ranks reported agree=True
+        """
+        if not self.is_distributed():
+            return agree
+
+        try:
+            # Use MIN: if agree=True, we send 1; if agree=False, we send 0
+            # After MIN, if result is 1, all ranks agreed (all sent 1)
+            # If result is 0, at least one rank disagreed (sent 0)
+            t = torch.tensor([1 if agree else 0], dtype=torch.int32, device=device)
+            dist.all_reduce(t, op=dist.ReduceOp.MIN)
+            out = t.item() == 1  # True only if all ranks agreed
+            if not out and self.is_master and tag:
+                tplr.logger.debug(f"[sync:{tag}] at least one rank disagreed")
+            return out
+        except Exception as e:
+            if tag:
+                tplr.logger.error(f"[sync:{tag}] all_reduce failed: {e}")
+            return agree  # Return local value on failure
+
     def broadcast(self, tensor: torch.Tensor, src: int = 0) -> None:
         """
         Broadcast tensor from source rank to all other ranks.

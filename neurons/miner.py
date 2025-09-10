@@ -496,15 +496,31 @@ class Miner(BaseNode, Trainer):
 
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
-            # Check if we're in a null round (warmup phase)
+            # Check if we're in a null round (warmup phase or no gather peers)
             window_offset = self.current_window - (
                 self.start_window or self.current_window
             )
-            null_round = window_offset < self.warmup_windows
+            warmup_null = window_offset < self.warmup_windows
+            no_peers_null = len(self.comms.peers) == 0
+
+            # Broadcast null round decision to all ranks - all ranks must agree to do null round
+            null_round = dist_helper.all_agree(
+                warmup_null or no_peers_null, self.device, "null_round_check"
+            )
+
             if null_round:
-                tplr.logger.info(
-                    f"Start accumulating... (null round: warmup {window_offset + 1}/{self.warmup_windows})"
-                )
+                if warmup_null:
+                    tplr.logger.info(
+                        f"Start accumulating... (null round: warmup {window_offset + 1}/{self.warmup_windows})"
+                    )
+                elif no_peers_null:
+                    tplr.logger.info(
+                        f"Start accumulating... (null round: no gather peers available)"
+                    )
+                else:
+                    tplr.logger.info(
+                        f"Start accumulating... (null round: triggered by another rank)"
+                    )
             else:
                 tplr.logger.info("Start accumulating...")
 

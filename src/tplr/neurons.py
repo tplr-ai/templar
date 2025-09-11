@@ -254,16 +254,16 @@ def outer_step(
     src_rank = 0
     on_src = is_master or not ddp
 
-    # Only master reads aggregated payload
+    # Only master reads aggregated payload (others rely on broadcasts).
+    # Accept both SimpleNamespace and plain dict payloads.
     src_sd: dict | None = None
     if (
         on_src
         and gather_result is not None
         and getattr(gather_result, "state_dict", None) is not None
     ):
-        src_sd = gather_result.state_dict
-        if isinstance(src_sd, SimpleNamespace):
-            src_sd = vars(src_sd).copy()
+        sd = gather_result.state_dict
+        src_sd = vars(sd).copy() if isinstance(sd, SimpleNamespace) else dict(sd)
 
     # compact flag broadcast
     def _bcast_flag(v: int) -> int:
@@ -275,6 +275,24 @@ def outer_step(
     # optional stats
     min_median_norm = float("inf")
     max_median_norm = float("-inf")
+
+    def _idx_to_device(obj, dev: str):
+        """
+        Move indices to device, supporting:
+          • Tensor
+          • (packed_tensor, original_shape) for 12-bit packed indices
+          • nested list/tuple containers of the above
+        We only move the tensor parts; shapes/ints stay on CPU.
+        """
+        if torch.is_tensor(obj):
+            return obj.to(device=dev, non_blocking=True)
+        if isinstance(obj, tuple) and len(obj) == 2 and torch.is_tensor(obj[0]):
+            return (obj[0].to(device=dev, non_blocking=True), obj[1])
+        if isinstance(obj, list):
+            return [_idx_to_device(x, dev) for x in obj]
+        if isinstance(obj, tuple):
+            return tuple(_idx_to_device(x, dev) for x in obj)
+        return obj
 
     for name, p in model.named_parameters():
         # ---- master decides if this param has an update; others receive a flag ----
@@ -291,9 +309,12 @@ def outer_step(
                     idxs = [idxs]
                 if not isinstance(vals, (list, tuple)):
                     vals = [vals]
+                # Dequantize values directly on target device (H2D per-block if needed)
                 vals_f32 = compressor.maybe_dequantize_values(vals, qps, device)
                 if vals_f32:
-                    payload = (idxs, vals_f32)
+                    # Ensure indices (or packed tuples) live on the same device as 'ref'
+                    idxs_dev = _idx_to_device(idxs, device)
+                    payload = (idxs_dev, vals_f32)
                     has_update = 1
 
         flag_result = _bcast_flag(has_update)
@@ -307,37 +328,46 @@ def outer_step(
 
         # ------- build the full dense grad on the source rank only -------
         if on_src:
-            idxs, vals_f32 = payload  # type: ignore[misc]
-            block_norms = torch.stack([torch.norm(v, p=2) for v in vals_f32])
+            try:
+                idxs_dev, vals_f32 = payload  # type: ignore[misc]
+                # Per-block norms for stats/optional clipping inside batch_decompress
+                block_norms = torch.stack([torch.norm(v, p=2) for v in vals_f32])
 
-            # stats
-            med = float(torch.median(block_norms).item())
-            min_median_norm = min(min_median_norm, med)
-            max_median_norm = max(max_median_norm, med)
+                # stats
+                med = float(torch.median(block_norms).item())
+                min_median_norm = min(min_median_norm, med)
+                max_median_norm = max(max_median_norm, med)
 
-            # Use empty_like to avoid copying the param; just provide dtype/device/shape
-            ref = torch.empty_like(p, device=device, dtype=p.dtype)
-            decompressed = compressor.batch_decompress(
-                ref,
-                idxs,
-                vals_f32,
-                xshapes[name],
-                totalks[name],
-                quantize_params=None,
-                block_norms=block_norms,
-                normalise=False,
-                clip_norm=True,
-            )
+                # Use empty_like to avoid copying the param; just provide dtype/device/shape
+                ref = torch.empty_like(p, device=device, dtype=p.dtype)
+                decompressed = compressor.batch_decompress(
+                    ref,
+                    idxs_dev,
+                    vals_f32,
+                    xshapes[name],
+                    totalks[name],
+                    quantize_params=None,
+                    block_norms=block_norms,
+                    normalise=False,
+                    clip_norm=True,
+                )
 
-            full_grad_src = transformer.decode(decompressed, use_dct=use_dct)
-            # Single conversion to target dtype+device to avoid extra temporaries
-            full_grad_src = full_grad_src.to(
-                dtype=p.dtype, device=p.device, non_blocking=True
-            )
-
-            # Free intermediate pieces ASAP
-            del vals_f32, idxs, vals, qps, ref, decompressed
-            decompressed = None
+                full_grad_src = transformer.decode(decompressed, use_dct=use_dct)
+                # Single conversion to target dtype+device to avoid extra temporaries
+                full_grad_src = full_grad_src.to(
+                    dtype=p.dtype, device=p.device, non_blocking=True
+                )
+            finally:
+                # Free intermediate pieces ASAP (existence-guarded)
+                try:
+                    del decompressed
+                except UnboundLocalError:
+                    pass
+                # vals/idxs/qps live in src_sd; only local views should be dropped
+                try:
+                    del vals_f32, idxs_dev, block_norms, ref
+                except UnboundLocalError:
+                    pass
 
         # ------- distribute/broadcast directly into p.grad, step, then free -------
         if isinstance(p, DT):

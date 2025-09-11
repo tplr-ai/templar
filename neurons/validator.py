@@ -88,6 +88,136 @@ def timer(name: str, wandb_obj=None, step=None, metrics_logger=None):
 
 
 class Validator(BaseNode, Trainer):
+    # ────────────────────────────────────────────────────────────────────
+    # Offload / reload aggregated gather results (CPU pinning helpers)
+    # ────────────────────────────────────────────────────────────────────
+    def offload_gather_results(self, gather_result, *, log: bool = True) -> None:
+        """
+        Move aggregated gather results (gather_result.state_dict) to pinned CPU memory.
+        Call right after idx overlap checking to free GPU memory during evaluation.
+        """
+        if gather_result is None:
+            return
+        if not getattr(self.hparams, "offload_gather_results", True):
+            return
+        if getattr(gather_result, "_offloaded", None) == "cpu":
+            return
+
+        moved_bytes = 0
+        t0 = time.time()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(getattr(self, "device", None))
+
+        state = getattr(gather_result, "state_dict", None)
+        if state is None:
+            return
+
+        def _to_pinned_cpu(obj):
+            nonlocal moved_bytes
+            if torch.is_tensor(obj):
+                if obj.device.type == "cpu":
+                    return obj.pin_memory() if not obj.is_pinned() else obj
+                dst = torch.empty_like(obj, device="cpu", pin_memory=True)
+                dst.copy_(obj, non_blocking=True)
+                moved_bytes += obj.element_size() * obj.numel()
+                return dst
+            if isinstance(obj, list):
+                return [_to_pinned_cpu(x) for x in obj]
+            if isinstance(obj, tuple):
+                return tuple(_to_pinned_cpu(x) for x in obj)
+            if isinstance(obj, dict):
+                return {k: _to_pinned_cpu(v) for k, v in obj.items()}
+            if isinstance(obj, SimpleNamespace):
+                for k, v in vars(obj).items():
+                    setattr(obj, k, _to_pinned_cpu(v))
+                return obj
+            return obj
+
+        # Accept both SimpleNamespace and dict layouts
+        if isinstance(state, SimpleNamespace):
+            _to_pinned_cpu(state)
+        elif isinstance(state, dict):
+            for k, v in list(state.items()):
+                state[k] = _to_pinned_cpu(v)
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(getattr(self, "device", None))
+            torch.cuda.empty_cache()
+        setattr(gather_result, "_offloaded", "cpu")
+
+        if log:
+            tplr.log_with_context(
+                level="info",
+                message=(
+                    "[GatherOffload] aggregator → CPU pinned | moved ~"
+                    f"{moved_bytes / 1e6:.1f} MB in {time.time() - t0:.3f}s"
+                ),
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
+    def load_gather_results_to_device(
+        self, gather_result, device: torch.device, *, log: bool = True
+    ) -> None:
+        """
+        Move aggregated gather results back to the specified device from pinned CPU.
+        Call immediately before outer step.
+        """
+        if gather_result is None:
+            return
+        if getattr(gather_result, "_offloaded", None) != "cpu":
+            return
+
+        moved_bytes = 0
+        t0 = time.time()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+
+        state = getattr(gather_result, "state_dict", None)
+        if state is None:
+            return
+
+        def _to_device(obj):
+            nonlocal moved_bytes
+            if torch.is_tensor(obj):
+                if obj.device == device:
+                    return obj
+                out = obj.to(device=device, non_blocking=True)
+                moved_bytes += obj.element_size() * obj.numel()
+                return out
+            if isinstance(obj, list):
+                return [_to_device(x) for x in obj]
+            if isinstance(obj, tuple):
+                return tuple(_to_device(x) for x in obj)
+            if isinstance(obj, dict):
+                return {k: _to_device(v) for k, v in obj.items()}
+            if isinstance(obj, SimpleNamespace):
+                for k, v in vars(obj).items():
+                    setattr(obj, k, _to_device(v))
+                return obj
+            return obj
+
+        if isinstance(state, SimpleNamespace):
+            _to_device(state)
+        elif isinstance(state, dict):
+            for k, v in list(state.items()):
+                state[k] = _to_device(v)
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+        setattr(gather_result, "_offloaded", None)
+
+        if log:
+            tplr.log_with_context(
+                level="info",
+                message=(
+                    f"[GatherOffload] aggregator → {device.type} | moved ~"
+                    f"{moved_bytes / 1e6:.1f} MB in {time.time() - t0:.3f}s"
+                ),
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
     @staticmethod
     def validator_config():
         parser = argparse.ArgumentParser(description="Validator script")
@@ -1128,6 +1258,9 @@ class Validator(BaseNode, Trainer):
                         sync_window=self.sync_window,
                         current_window=self.current_window,
                     )
+
+                # Offload aggregated gather results to pinned CPU to free GPU memory
+                self.offload_gather_results(gather_result, log=True)
 
                 skipped_uids = gather_result.skipped_uids
                 success_rate = gather_result.success_rate

@@ -43,10 +43,10 @@ Append the following env keys:
 
 ```bash
 R2_DATASET_ACCOUNT_ID=8af7f92a8a0661cf7f1ac0420c932980
-R2_DATASET_BUCKET_NAME=dataset-migration
-R2_DATASET_READ_ACCESS_KEY_ID=5c42b46cfe147cd175295eb78500c291
-R2_DATASET_READ_SECRET_ACCESS_KEY=40900cbd916b47c1012396afdd29ee6cae39606ad334886849944dd03362f42d
-DATASET_BINS_PATH="remote/tokenized/"
+R2_DATASET_BUCKET_NAME=gemma-migration
+R2_DATASET_READ_ACCESS_KEY_ID=a733fac6c32a549e0d48f9f7cf67d758
+R2_DATASET_READ_SECRET_ACCESS_KEY=f50cab456587f015ad21c48c3e23c7ff0e6f1ad5a22c814c3a50d1a4b7c76bb9
+DATASET_BINS_PATH="tokenized/"
 ```
 
 That's all! For the minimum setup, the dataset has been built and is available by providing those keys. The `SharedShardedDatasetManager` takes care of everything else. Unlike previously where user steps were required, now you only have to point to a bucket with the shards in it.
@@ -90,16 +90,16 @@ Here are the key-value pairs for the UI:
 
 - Bucket Information
   `Source bucket provider`: `S3-Compatible Storage`
-  `Bucket name`: `dataset-migration`
-  `S3-compatible endpoint URL`: `https://8af7f92a8a0661cf7f1ac0420c932980.r2.cloudflarestorage.com/dataset-migration`
+  `Bucket name`: `gemma-migration`
+  `S3-compatible endpoint URL`: `https://8af7f92a8a0661cf7f1ac0420c932980.r2.cloudflarestorage.com/gemma-migration`
 - Required Credentials
-  `Access Key ID`: `5c42b46cfe147cd175295eb78500c291`
-  `Secret Access Key`: `40900cbd916b47c1012396afdd29ee6cae39606ad334886849944dd03362f42d`
+  `Access Key ID`: `a733fac6c32a549e0d48f9f7cf67d758`
+  `Secret Access Key`: `f50cab456587f015ad21c48c3e23c7ff0e6f1ad5a22c814c3a50d1a4b7c76bb9`
 
 #### Page 2
 
 - Select destination R2 bucket
-  `Bucket name`: `dataset-migration`
+  `Bucket name`: `gemma-migration`
   `Access Key ID`: your_write_id
   `Access Key`: your_secret_write_id
   `Overwrite files?`: `Yes, overwrite (recommended)`

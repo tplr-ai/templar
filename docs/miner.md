@@ -166,10 +166,10 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    # Dataset R2 credentials - You may set up your own Shared Sharded Dataset, but must at minimum set these keys
    # See docs/shared_sharded_dataset.md for instructions
    export R2_DATASET_ACCOUNT_ID="8af7f92a8a0661cf7f1ac0420c932980"
-   export R2_DATASET_BUCKET_NAME="dataset-migration"
-   export R2_DATASET_READ_ACCESS_KEY_ID="5c42b46cfe147cd175295eb78500c291"
-   export R2_DATASET_READ_SECRET_ACCESS_KEY="40900cbd916b47c1012396afdd29ee6cae39606ad334886849944dd03362f42d"
-   export DATASET_BINS_PATH="remote/tokenized/"
+   export R2_DATASET_BUCKET_NAME="gemma-migration"
+   export R2_DATASET_READ_ACCESS_KEY_ID="a733fac6c32a549e0d48f9f7cf67d758"
+   export R2_DATASET_READ_SECRET_ACCESS_KEY="f50cab456587f015ad21c48c3e23c7ff0e6f1ad5a22c814c3a50d1a4b7c76bb9"
+   export DATASET_BINS_PATH="tokenized/"
 
 
    # Aggregator R2 credentials

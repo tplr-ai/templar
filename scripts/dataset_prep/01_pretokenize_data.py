@@ -267,7 +267,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--r2_prefix",
-        default="remote/tokenized2/",
+        default="tokenized/",
         help="R2 prefix for shards",
     )
     parser.add_argument(

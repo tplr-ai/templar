@@ -176,7 +176,7 @@ async def main() -> None:
     )
     parser.add_argument(
         "--r2_prefix",
-        default="remote/tokenized/",
+        default="tokenized/",
         help="R2 prefix for shards",
     )
     parser.add_argument(

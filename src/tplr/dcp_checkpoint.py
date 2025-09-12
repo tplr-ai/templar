@@ -661,8 +661,32 @@ class DCPCheckpointer:
     ) -> None:
         layout = Layout(self.version, window)
         ckpt_dir = self._local_dir(layout)
+        
+        # Check if checkpoint directory exists
+        if not ckpt_dir.exists():
+            raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
+        
+        # List available files for debugging
+        files = list(ckpt_dir.iterdir()) if ckpt_dir.exists() else []
+        tplr.logger.info(
+            f"[DCP][load-local] rank {_rank()}/{_world()} loading from {ckpt_dir} "
+            f"(found {len(files)} files)"
+        )
+        
         state = {"app": AppState(model)}
-        load(state_dict=state, checkpoint_id=str(ckpt_dir), process_group=process_group)
+        try:
+            load(state_dict=state, checkpoint_id=str(ckpt_dir), process_group=process_group)
+            tplr.logger.info(
+                f"[DCP][load-local] rank {_rank()}/{_world()} successfully loaded checkpoint"
+            )
+        except FileNotFoundError as e:
+            # List all files in the directory for debugging
+            file_list = [f.name for f in files] if files else ["<no files>"]
+            tplr.logger.error(
+                f"[DCP][load-local] rank {_rank()}/{_world()} failed to load: {e}. "
+                f"Available files: {file_list}"
+            )
+            raise
 
     async def download_and_load(
         self,
@@ -673,22 +697,34 @@ class DCPCheckpointer:
         process_group: dist.ProcessGroup | None = None,
         prefer_highest_staked: bool = True,
     ) -> tuple[int, int] | None:
-        local_dir = await (
-            self.download_distributed(
-                window=window, prefer_highest_staked=prefer_highest_staked
-            )
-            if shared_fs
-            else self.download_all(
-                window=window, prefer_highest_staked=prefer_highest_staked
-            )
+        # First try: use download_all for safety to ensure all ranks have all files
+        # TODO: Re-enable distributed download optimization once loading issues are resolved
+        local_dir = await self.download_all(
+            window=window, prefer_highest_staked=prefer_highest_staked
         )
+        
         if local_dir is None:
             return None
-        sidecar = json.loads((local_dir / "extra_metadata.json").read_text())
-        w = int(sidecar["window"])
-        global_step = int(sidecar.get("global_step", -1))
-        self.load_local(model=model, window=w, process_group=process_group)
-        return w, global_step
+            
+        try:
+            sidecar = json.loads((local_dir / "extra_metadata.json").read_text())
+            w = int(sidecar["window"])
+            global_step = int(sidecar.get("global_step", -1))
+            self.load_local(model=model, window=w, process_group=process_group)
+            return w, global_step
+        except FileNotFoundError as e:
+            # If loading fails due to missing files, log the error
+            tplr.logger.warning(
+                f"[DCP][download-and-load] Loading failed with FileNotFoundError: {e}. "
+                "This usually indicates incomplete checkpoint files."
+            )
+            # Re-raise the error for upstream handling
+            raise
+        except Exception as e:
+            tplr.logger.error(
+                f"[DCP][download-and-load] Loading failed with unexpected error: {e}"
+            )
+            raise
 
     async def check_checkpoint_exists(
         self, *, window: int, prefer_highest_staked: bool = True

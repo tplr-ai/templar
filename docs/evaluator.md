@@ -51,6 +51,7 @@ Run the evaluator using Docker Compose:
    # Required variables
    WALLET_NAME=your_wallet_name
    WALLET_HOTKEY=your_hotkey
+   HF_TOKEN=your_huggingface_token  # Required for tokenizer access
    WANDB_API_KEY=your_wandb_key
    NETUID=268  # or your target netuid
    

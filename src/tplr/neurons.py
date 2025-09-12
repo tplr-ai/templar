@@ -97,20 +97,20 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
     else:
         model_iterator = miner.model.named_parameters()
 
+    # Build params dict once to avoid repeated iteration
+    params_dict = dict(miner.model.named_parameters())
+
     # Batch load all error feedback tensors to GPU
     for n in miner.owned_params:
         if miner.error_feedback.get(n, None) is not None:
             if miner.error_feedback[n].is_cuda:
                 continue
             # Get the device from the corresponding parameter
-            param = dict(miner.model.named_parameters()).get(n)
+            param = params_dict.get(n)
             if param is not None:
                 miner.error_feedback[n] = miner.error_feedback[n].to(
                     param.device, non_blocking=True
                 )
-    # Synchronize to ensure all transfers complete
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
 
     for _, (n, p) in enumerate(model_iterator, 1):
         owned = n in miner.owned_params
@@ -131,19 +131,9 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
             assert g is not None, f"p.grad is None for {n}"
             grad_full = g.to(p.device)
 
-        # --- 2) Param full_tensor rendezvous (PFULL) for DT params ---
-        full_p = None
-        if p_is_dt:
-            grp_p = get_mesh_group(p)
-            barrier(grp_p)
-            assert isinstance(p, DT)
-            full_p = p.full_tensor().to(p.device)
-            barrier(grp_p)
-
-        # Non-owners: after participating in collectives, drop grad and continue.
+        # Non-owners: after participating in grad collective, drop grad and continue.
         if not owned:
             p.grad = None
-            full_p = None
             continue
 
         # --- 3) Momentum buffer update (owner only) ---
@@ -171,15 +161,10 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
         del encoded
 
         # --- 5) Decompress reference (owner only) ---
-        if p_is_dt:
-            assert full_p is not None
-            decompressed = miner.compressor.decompress(
-                full_p, idxs, vals, xshape, totalk, quant_params
-            )
-        else:
-            decompressed = miner.compressor.decompress(
-                p, idxs, vals, xshape, totalk, quant_params
-            )
+        # Pass p directly - decompress only uses p.device and p.dtype
+        decompressed = miner.compressor.decompress(
+            p, idxs, vals, xshape, totalk, quant_params
+        )
 
         # --- 6) Decode & error-feedback update (owner only) ---
         transmit_grad = miner.transformer.decode(decompressed, use_dct=use_dct)
@@ -188,11 +173,28 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
         # Keep error feedback on GPU for now, batch offload later
         miner.error_feedback[n] = error_feedback
         del transmit_grad, error_feedback
-        full_p = None
 
-        # --- 7) Pack outputs (move compressed artifacts to CPU) ---
-        gradient[n + "idxs"] = idxs.cpu() if isinstance(idxs, torch.Tensor) else idxs
-        gradient[n + "vals"] = vals.cpu() if isinstance(vals, torch.Tensor) else vals
+        # --- 7) Pack outputs (move compressed artifacts to CPU asynchronously) ---
+        # Using non_blocking=True for async D2H transfers when CUDA is available
+        if isinstance(idxs, torch.Tensor):
+            if torch.cuda.is_available():
+                cpu_idxs = torch.empty_like(idxs, device="cpu", pin_memory=True)
+                cpu_idxs.copy_(idxs, non_blocking=True)
+                gradient[n + "idxs"] = cpu_idxs
+            else:
+                gradient[n + "idxs"] = idxs.cpu()
+        else:
+            gradient[n + "idxs"] = idxs
+
+        if isinstance(vals, torch.Tensor):
+            if torch.cuda.is_available():
+                cpu_vals = torch.empty_like(vals, device="cpu", pin_memory=True)
+                cpu_vals.copy_(vals, non_blocking=True)
+                gradient[n + "vals"] = cpu_vals
+            else:
+                gradient[n + "vals"] = vals.cpu()
+        else:
+            gradient[n + "vals"] = vals
         gradient[n + "quant_params"] = quant_params
         xshapes[n] = xshape
         totalks[n] = totalk
@@ -212,10 +214,9 @@ def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = F
             )
             miner.error_feedback[name] = miner.error_feedback_cpu_buffers[name]
 
+    # Single synchronization at the end for all async operations
     if torch.cuda.is_available():
         torch.cuda.synchronize()
-
-    if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gradient["metadata"] = {"window": step_window}
     return gradient, xshapes, totalks
@@ -253,16 +254,16 @@ def outer_step(
     src_rank = 0
     on_src = is_master or not ddp
 
-    # Only master reads aggregated payload
+    # Only master reads aggregated payload (others rely on broadcasts).
+    # Accept both SimpleNamespace and plain dict payloads.
     src_sd: dict | None = None
     if (
         on_src
         and gather_result is not None
         and getattr(gather_result, "state_dict", None) is not None
     ):
-        src_sd = gather_result.state_dict
-        if isinstance(src_sd, SimpleNamespace):
-            src_sd = vars(src_sd).copy()
+        sd = gather_result.state_dict
+        src_sd = vars(sd).copy() if isinstance(sd, SimpleNamespace) else dict(sd)
 
     # compact flag broadcast
     def _bcast_flag(v: int) -> int:
@@ -274,6 +275,24 @@ def outer_step(
     # optional stats
     min_median_norm = float("inf")
     max_median_norm = float("-inf")
+
+    def _idx_to_device(obj, dev: str):
+        """
+        Move indices to device, supporting:
+          • Tensor
+          • (packed_tensor, original_shape) for 12-bit packed indices
+          • nested list/tuple containers of the above
+        We only move the tensor parts; shapes/ints stay on CPU.
+        """
+        if torch.is_tensor(obj):
+            return obj.to(device=dev, non_blocking=True)
+        if isinstance(obj, tuple) and len(obj) == 2 and torch.is_tensor(obj[0]):
+            return (obj[0].to(device=dev, non_blocking=True), obj[1])
+        if isinstance(obj, list):
+            return [_idx_to_device(x, dev) for x in obj]
+        if isinstance(obj, tuple):
+            return tuple(_idx_to_device(x, dev) for x in obj)
+        return obj
 
     for name, p in model.named_parameters():
         # ---- master decides if this param has an update; others receive a flag ----
@@ -290,9 +309,12 @@ def outer_step(
                     idxs = [idxs]
                 if not isinstance(vals, (list, tuple)):
                     vals = [vals]
+                # Dequantize values directly on target device (H2D per-block if needed)
                 vals_f32 = compressor.maybe_dequantize_values(vals, qps, device)
                 if vals_f32:
-                    payload = (idxs, vals_f32)
+                    # Ensure indices (or packed tuples) live on the same device as 'ref'
+                    idxs_dev = _idx_to_device(idxs, device)
+                    payload = (idxs_dev, vals_f32)
                     has_update = 1
 
         flag_result = _bcast_flag(has_update)
@@ -306,37 +328,46 @@ def outer_step(
 
         # ------- build the full dense grad on the source rank only -------
         if on_src:
-            idxs, vals_f32 = payload  # type: ignore[misc]
-            block_norms = torch.stack([torch.norm(v, p=2) for v in vals_f32])
+            try:
+                idxs_dev, vals_f32 = payload  # type: ignore[misc]
+                # Per-block norms for stats/optional clipping inside batch_decompress
+                block_norms = torch.stack([torch.norm(v, p=2) for v in vals_f32])
 
-            # stats
-            med = float(torch.median(block_norms).item())
-            min_median_norm = min(min_median_norm, med)
-            max_median_norm = max(max_median_norm, med)
+                # stats
+                med = float(torch.median(block_norms).item())
+                min_median_norm = min(min_median_norm, med)
+                max_median_norm = max(max_median_norm, med)
 
-            # Use empty_like to avoid copying the param; just provide dtype/device/shape
-            ref = torch.empty_like(p, device=device, dtype=p.dtype)
-            decompressed = compressor.batch_decompress(
-                ref,
-                idxs,
-                vals_f32,
-                xshapes[name],
-                totalks[name],
-                quantize_params=None,
-                block_norms=block_norms,
-                normalise=False,
-                clip_norm=True,
-            )
+                # Use empty_like to avoid copying the param; just provide dtype/device/shape
+                ref = torch.empty_like(p, device=device, dtype=p.dtype)
+                decompressed = compressor.batch_decompress(
+                    ref,
+                    idxs_dev,
+                    vals_f32,
+                    xshapes[name],
+                    totalks[name],
+                    quantize_params=None,
+                    block_norms=block_norms,
+                    normalise=False,
+                    clip_norm=True,
+                )
 
-            full_grad_src = transformer.decode(decompressed, use_dct=use_dct)
-            # Single conversion to target dtype+device to avoid extra temporaries
-            full_grad_src = full_grad_src.to(
-                dtype=p.dtype, device=p.device, non_blocking=True
-            )
-
-            # Free intermediate pieces ASAP
-            del vals_f32, idxs, vals, qps, ref, decompressed
-            decompressed = None
+                full_grad_src = transformer.decode(decompressed, use_dct=use_dct)
+                # Single conversion to target dtype+device to avoid extra temporaries
+                full_grad_src = full_grad_src.to(
+                    dtype=p.dtype, device=p.device, non_blocking=True
+                )
+            finally:
+                # Free intermediate pieces ASAP (existence-guarded)
+                try:
+                    del decompressed
+                except UnboundLocalError:
+                    pass
+                # vals/idxs/qps live in src_sd; only local views should be dropped
+                try:
+                    del vals_f32, idxs_dev, block_norms, ref
+                except UnboundLocalError:
+                    pass
 
         # ------- distribute/broadcast directly into p.grad, step, then free -------
         if isinstance(p, DT):

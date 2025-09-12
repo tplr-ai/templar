@@ -82,9 +82,11 @@ There are two useful directives when self hosting:
 
 ### R2 Self-Hosting `<a name="dataset-migration"></a>`
 
-For the self hosting, please use the CloudFlare migration tool .
+For self hosting, you have two options: using the CloudFlare migration tool (recommended) or using rclone for manual migration.
 
-Here are the key-value pairs for the UI:
+#### Option 1: CloudFlare Migration Tool (Recommended)
+
+Use the CloudFlare migration tool for the easiest setup. Here are the key-value pairs for the UI:
 
 #### Page 1
 
@@ -103,6 +105,63 @@ Here are the key-value pairs for the UI:
   `Access Key ID`: your_write_id
   `Access Key`: your_secret_write_id
   `Overwrite files?`: `Yes, overwrite (recommended)`
+
+#### Option 2: Manual Migration with rclone
+
+If you encounter issues with the CloudFlare migration tool or need more control over the migration process, you can use rclone. This method also allows you to copy specific shards for testing purposes.
+
+**Note**: Migration speed depends heavily on your internet connection. A faster connection (10Gbps+) will significantly reduce transfer times.
+
+##### Install rclone
+```bash
+curl https://rclone.org/install.sh | sudo bash
+```
+
+##### Configure rclone for source and destination buckets
+```bash
+# Configure source (read-only)
+rclone config create r2-source s3 \
+  provider=Cloudflare \
+  access_key_id=a733fac6c32a549e0d48f9f7cf67d758 \
+  secret_access_key=f50cab456587f015ad21c48c3e23c7ff0e6f1ad5a22c814c3a50d1a4b7c76bb9 \
+  endpoint=https://8af7f92a8a0661cf7f1ac0420c932980.r2.cloudflarestorage.com \
+  acl=private
+
+# Configure destination (your bucket)
+rclone config create r2-dest s3 \
+  provider=Cloudflare \
+  access_key_id=<your-write-access-key-id> \
+  secret_access_key=<your-write-secret-access-key> \
+  endpoint=https://<your-account-id>.r2.cloudflarestorage.com \
+  acl=private
+```
+
+##### Copy all shards (Full Migration)
+```bash
+# Copy entire tokenized directory (all shards and sample IDs)
+rclone copy r2-source:gemma-migration/tokenized/ r2-dest:<your-bucket-name>/tokenized/ \
+  --transfers 32 \
+  --checkers 16 \
+  --progress
+```
+
+##### Copy specific shards (Partial Migration for Testing)
+If you want to test with just the first two shards:
+```bash
+# Copy first two training shards and their sample IDs
+rclone copy r2-source:gemma-migration/tokenized/train_000000.npy r2-dest:<your-bucket-name>/tokenized/ --progress
+rclone copy r2-source:gemma-migration/tokenized/train_000001.npy r2-dest:<your-bucket-name>/tokenized/ --progress
+rclone copy r2-source:gemma-migration/tokenized/sample_ids_000000.bin r2-dest:<your-bucket-name>/tokenized/ --progress
+rclone copy r2-source:gemma-migration/tokenized/sample_ids_000001.bin r2-dest:<your-bucket-name>/tokenized/ --progress
+```
+
+After migration, update your environment variables to point to your bucket:
+```bash
+R2_DATASET_ACCOUNT_ID=<your-account-id>
+R2_DATASET_BUCKET_NAME=<your-bucket-name>
+R2_DATASET_READ_ACCESS_KEY_ID=<your-read-access-key-id>
+R2_DATASET_READ_SECRET_ACCESS_KEY=<your-read-secret-access-key>
+```
 
 ### Keeping inactive shards on disk
 

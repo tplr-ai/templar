@@ -45,7 +45,7 @@ class SharedShardedDataset(Dataset):
         rank: int,
         world_size: int,
         *,
-        token_dtype: npt.DTypeLike = np.uint16,  # MUST match preprocessing
+        token_dtype: npt.DTypeLike = np.uint32,  # MUST match preprocessing
         file_prefix: str = "train",  # Allow custom file prefix (e.g., "val", "eval")
     ):
         super().__init__()
@@ -167,7 +167,7 @@ class ShardedDatasetManager:
         rank: int,
         world_size: int,
         comms: tplr.comms.Comms,
-        token_dtype: npt.DTypeLike = np.uint16,
+        token_dtype: npt.DTypeLike = np.uint32,
         file_prefix: str = "train",
     ):
         """Initializes the dataset manager.
@@ -257,8 +257,11 @@ class ShardedDatasetManager:
         Returns:
             An instance of `SharedShardedDataset`.
         """
-        download_task = self.prepare_shard(shard_index)
-        await download_task
+        # Only rank 0 downloads the shard, others wait
+        if self.rank == 0:
+            download_task = self.prepare_shard(shard_index)
+            await download_task
+        # Non-master ranks will just check if files exist (downloaded by rank 0)
 
         dataset = SharedShardedDataset(
             shard_index=shard_index,
@@ -281,7 +284,13 @@ class ShardedDatasetManager:
         """
         self.active_dataset = await self.create_dataset(current_shard_index)
         next_shard = (current_shard_index + 1) % self.max_dataset_idx
-        self.upcoming_dataset = self.prepare_shard(next_shard)
+
+        # Only rank 0 prepares the next shard to avoid duplicate downloads
+        if self.rank == 0:
+            self.upcoming_dataset = self.prepare_shard(next_shard)
+        else:
+            # Non-master ranks create a dummy completed task
+            self.upcoming_dataset = asyncio.create_task(asyncio.sleep(0))
         return
 
     async def swap_datasets(self) -> int:

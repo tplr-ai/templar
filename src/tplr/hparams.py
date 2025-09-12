@@ -85,8 +85,19 @@ def create_namespace(hparams: dict) -> SimpleNamespace:
 
     # Initialize tokenizer
     try:
+        # Check for HF token in environment for gated models
+        import os
+
+        token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
+        if token:
+            logger.info(
+                f"Using HF token from environment for {hparams_ns.tokenizer_name}"
+            )
         hparams_ns.tokenizer = AutoTokenizer.from_pretrained(
-            hparams_ns.tokenizer_name, verbose=False, clean_up_tokenization_spaces=True
+            hparams_ns.tokenizer_name,
+            verbose=False,
+            clean_up_tokenization_spaces=True,
+            token=token,  # Will be None if not set, which is fine for public models
         )
         hparams_ns.tokenizer.pad_token = hparams_ns.tokenizer.eos_token
     except Exception as e:

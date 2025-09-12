@@ -207,6 +207,8 @@ class Trainer:
                     weight_decay=adamw_weight_decay,
                     betas=tuple(adamw_config.get("betas", [0.9, 0.95])),
                     eps=adamw_config.get("eps", 1e-8),
+                    fused=True,
+                    foreach=False,
                 )
                 tplr.logger.info(
                     f"[Init] Using AdamW inner optimizer with lr={adamw_lr}, "
@@ -392,6 +394,91 @@ class Trainer:
 
         return total_loss, n_batches
 
+    # ------------------------------------------------------------------
+    # Optimizer-state offload/prefetch (CPU <-> GPU) for inner optimizer
+    # ------------------------------------------------------------------
+    def _iter_inner_opt_state_tensors(self):
+        """Yield (state_dict, key, tensor) triples for all tensor states of self.inner_optimizer."""
+        opt = getattr(self, "inner_optimizer", None)
+        if opt is None:
+            return
+        state = opt.state
+        # opt.state uses Param tensors as keys; values are dicts with tensors like 'exp_avg', 'exp_avg_sq', etc.
+        for p, s in state.items():
+            if not isinstance(s, dict):
+                continue
+            for k, v in list(s.items()):
+                if torch.is_tensor(v):
+                    yield s, k, v
+
+    def offload_inner_optimizer_states(self, *, log: bool = True) -> None:
+        """
+        Move inner optimizer state tensors (e.g., AdamW exp_avg, exp_avg_sq) to pinned CPU memory.
+        Safe to call after an inner step finishes and before gradient compression.
+        """
+        if not getattr(self.hparams, "offload_optimizer_states", True):
+            return
+        opt = getattr(self, "inner_optimizer", None)
+        if opt is None or getattr(self, "_inner_opt_offloaded", False):
+            return
+        moved_bytes = 0
+        t0 = time.time()
+        # Ensure all GPU kernels are done before D2H copies
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(getattr(self, "device", None))
+        for s, k, v in self._iter_inner_opt_state_tensors():
+            if v.device.type == "cpu":
+                # Pin CPU tensors to speed up subsequent H2D copies (no extra alloc if already pinned)
+                if not v.is_pinned():
+                    s[k] = v.pin_memory()
+                continue
+            # Asynchronous D2H into pinned CPU memory
+            dst = torch.empty_like(v, device="cpu", pin_memory=True)
+            dst.copy_(v, non_blocking=True)
+            s[k] = dst  # drop GPU reference; GC frees it
+            moved_bytes += v.element_size() * v.numel()
+        # Ensure D2H copies complete before we proceed
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(getattr(self, "device", None))
+            torch.cuda.empty_cache()
+        self._inner_opt_offloaded = True
+        if log:
+            tplr.logger.info(
+                "[OptOffload] inner optimizer → CPU pinned | moved ~"
+                f"{moved_bytes / 1e6:.1f} MB in {time.time() - t0:.3f}s"
+            )
+
+    def prefetch_inner_optimizer_states(self, *, log: bool = True) -> None:
+        """
+        Move inner optimizer state tensors back to GPU (device) asynchronously.
+        Call at the very start of inner_steps() before any optimizer.step().
+        """
+        if not getattr(self.hparams, "offload_optimizer_states", True):
+            return
+        opt = getattr(self, "inner_optimizer", None)
+        if opt is None or not getattr(self, "_inner_opt_offloaded", False):
+            return
+        device = getattr(
+            self, "device", torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        moved_bytes = 0
+        t0 = time.time()
+        for s, k, v in self._iter_inner_opt_state_tensors():
+            if v.device == device:
+                continue
+            # Asynchronous H2D copy
+            dst = torch.empty_like(v, device=device)
+            dst.copy_(v, non_blocking=True)
+            s[k] = dst
+            moved_bytes += v.element_size() * v.numel()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+        self._inner_opt_offloaded = False
+        if log:
+            tplr.logger.info(
+                f"[OptOffload] inner optimizer ← GPU {device} | moved ~{moved_bytes / 1e6:.1f} MB in {time.time() - t0:.3f}s"
+            )
+
     async def inner_steps(
         self,
         loader: DataLoader,
@@ -415,6 +502,10 @@ class Trainer:
             self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
             self.loop.set_default_executor(self.executor)
 
+        # --- Prefetch inner optimizer states back to GPU, if they were offloaded ---
+        # Do this once per window, not per micro-batch.
+        self.prefetch_inner_optimizer_states()
+
         # Initialize profiler if config is available (from BaseNode)
         prof_config = getattr(self, "_prof_config", None)
         prof = None
@@ -437,11 +528,6 @@ class Trainer:
         global_loss_sum: float = 0.0
         local_tokens_sum: int = 0  # local running totals
         local_loss_sum: float = 0.0
-
-        offload_start = time.time()
-        params_offloaded, param_specs = dist_helper.get_offloaded_params(self.model)
-        offload_time = time.time() - offload_start
-        tplr.logger.info(f"Parameter offload to CPU took {offload_time:.4f}s")
 
         inner_step_count: int = 0
         loader_iter = iter(loader)
@@ -638,19 +724,8 @@ class Trainer:
 
             await asyncio.sleep(0)
 
-            # ------------------------------------------------------------------ #
-            # 6. parameter offloading logic
-            # ------------------------------------------------------------------ #
-            with tp.record_function("Parameter Offloading") if prof else nullcontext():
-                restore_start = time.time()
-                dist_helper.restore_offloaded_params(
-                    self.model, params_offloaded, param_specs
-                )
-                restore_time = time.time() - restore_start
-                tplr.logger.info(f"Parameter restore to GPU took {restore_time:.4f}s")
-
         # ---------------------------------------------------------------------- #
-        # 7. Return aggregated metrics
+        # 6. Return aggregated metrics
         # ---------------------------------------------------------------------- #
         batch_count = int(dist_helper.ddp_reduce(batch_count, device=self.device))
         return {

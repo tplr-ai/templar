@@ -3779,7 +3779,7 @@ wheels = [
 [[package]]
 name = "torchtitan"
 version = "0.1.0"
-source = { git = "https://github.com/tplr-ai/torchtitan?branch=templar-main#ced02c2d32ca229edebacd1e3f4be59bddc89916" }
+source = { git = "https://github.com/tplr-ai/torchtitan?branch=templar-main#a25a978c7a5392d58a8e7e47bb367fa59e46cb69" }
 dependencies = [
     { name = "datasets" },
     { name = "fsspec" },

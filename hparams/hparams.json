@@ -8,8 +8,8 @@
     "batch_size": 192,
     "inner_steps": 30,
     "outer_learning_rate": 1.0,
-    "blocks_per_window": 115,
-    "windows_per_weights": 3,
+    "blocks_per_window": 125,
+    "windows_per_weights": 2,
     "outer_steps_per_shard": 455,
     "momentum_decay": 0.95,
     "topk_compression": 64,
@@ -41,8 +41,8 @@
     "eval_lr_factor": 0.2,
     "openskill_beta": 7,
     "openskill_tau": 0.1,
-    "checkpoint_init_version": "2.0.10",
-    "checkpoint_init_window": 55699,
+    "checkpoint_init_version": null,
+    "checkpoint_init_window": null,
     "num_evaluation_bins": 5,
     "quantization_bins": 4,
     "quantization_range": 6,
@@ -54,10 +54,10 @@
       "betas": [0.9, 0.95],
       "eps": 1e-8,
       "weight_decay": 0.1,
-      "learning_rate": 1.2e-4,
+      "learning_rate": 1.3e-4,
       "scheduler": {
-        "warmup_steps": 1000,
-        "t_max": 20000,
+        "warmup_steps": 1500,
+        "t_max": 140000,
         "eta_min_factor": 0.1
       }
     },
@@ -69,8 +69,8 @@
       "scalar_lr_scale": 0.2,
       "learning_rate": 2e-3,
       "scheduler": {
-        "warmup_steps": 1000,
-        "t_max": 20000,
+        "warmup_steps": 1500,
+        "t_max": 140000,
         "eta_min_factor": 0.1
       }
     }

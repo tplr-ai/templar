@@ -44,8 +44,14 @@ This guide will help you set up and run a validator for **τemplar**. Validators
 - **Docker** and **Docker Compose**
 - **Git**
 - **Python 3.12+** (for manual installation)
+- **Hugging Face Authentication**:
+  - Create a Hugging Face account and generate a token at https://huggingface.co/settings/tokens
+  - Accept the Gemma model terms at https://huggingface.co/google/gemma-3-270m (required for tokenizer access)
+  - Set `HF_TOKEN` environment variable with your token
 - **Cloudflare R2 Bucket Configuration**:
-  - **Dataset Setup**: Follow the instructions in the [Shared Sharded Dataset Guide](./shared_sharded_dataset.md)
+  - **Dataset Setup**: Please refer to [Shared Sharded Dataset Documentation](./shared_sharded_dataset.md) for complete dataset setup instructions, including:
+    - R2 bucket settings
+    - Dataset download process
   - **Gradient Bucket Setup**:
     1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
     2. **Generate Tokens**:
@@ -141,6 +147,12 @@ This guide will help you set up and run a validator for **τemplar**. Validators
    R2_DATASET_READ_ACCESS_KEY_ID=<your_dataset_read_access_key_id>
    R2_DATASET_READ_SECRET_ACCESS_KEY=<your_dataset_read_secret_access_key>
 
+   # Aggregator R2 credentials
+   R2_AGGREGATOR_ACCOUNT_ID=8af7f92a8a0661cf7f1ac0420c932980
+   R2_AGGREGATOR_BUCKET_NAME=aggregator
+   R2_AGGREGATOR_READ_ACCESS_KEY_ID=bb4b9f02a64dacead181786b8f353b67
+   R2_AGGREGATOR_READ_SECRET_ACCESS_KEY=f50761d0fbb0773c55f61debdf87439735c32c096fe4b1ab6aa6bfb7f52aa30b
+
    # Wallet Configuration
    WALLET_NAME=<your_wallet_name>
    WALLET_HOTKEY=<your_wallet_hotkey>
@@ -231,6 +243,12 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
    export R2_DATASET_BUCKET_NAME=your_dataset_bucket_name
    export R2_DATASET_READ_ACCESS_KEY_ID=your_dataset_read_access_key_id
    export R2_DATASET_READ_SECRET_ACCESS_KEY=your_dataset_read_secret_access_key
+
+   # Aggregator R2 credentials
+   export R2_AGGREGATOR_ACCOUNT_ID=8af7f92a8a0661cf7f1ac0420c932980
+   export R2_AGGREGATOR_BUCKET_NAME=aggregator
+   export R2_AGGREGATOR_READ_ACCESS_KEY_ID=bb4b9f02a64dacead181786b8f353b67
+   export R2_AGGREGATOR_READ_SECRET_ACCESS_KEY=f50761d0fbb0773c55f61debdf87439735c32c096fe4b1ab6aa6bfb7f52aa30b
    
    export GITHUB_USER=your_github_username
    ```
@@ -309,6 +327,12 @@ R2_DATASET_ACCOUNT_ID=your_dataset_account_id
 R2_DATASET_BUCKET_NAME=your_dataset_bucket_name
 R2_DATASET_READ_ACCESS_KEY_ID=your_dataset_read_access_key_id
 R2_DATASET_READ_SECRET_ACCESS_KEY=your_dataset_read_secret_access_key
+
+# Aggregator R2 credentials
+R2_AGGREGATOR_ACCOUNT_ID=8af7f92a8a0661cf7f1ac0420c932980
+R2_AGGREGATOR_BUCKET_NAME=aggregator
+R2_AGGREGATOR_READ_ACCESS_KEY_ID=bb4b9f02a64dacead181786b8f353b67
+R2_AGGREGATOR_READ_SECRET_ACCESS_KEY=f50761d0fbb0773c55f61debdf87439735c32c096fe4b1ab6aa6bfb7f52aa30b
 
 # Wallet Configuration
 WALLET_NAME=default

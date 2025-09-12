@@ -22,6 +22,7 @@ services:
       - NETWORK=${NETWORK:-finney}
       - DEBUG=${DEBUG:-false}
       - NETUID=${NETUID:-3}
+      - HF_TOKEN=${HF_TOKEN}
       - WANDB_API_KEY=${WANDB_API_KEY}
       - HOST_CUDA_VERSION=12.6
       - TORCH_NCCL_ASYNC_ERROR_HANDLING=1
@@ -72,6 +73,7 @@ services:
       - NETWORK=${NETWORK:-finney}
       - DEBUG=${DEBUG:-false}
       - NETUID=${NETUID:-3}
+      - HF_TOKEN=${HF_TOKEN}
       - WANDB_API_KEY=${WANDB_API_KEY}
       - HOST_CUDA_VERSION=12.6
       - EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-4}

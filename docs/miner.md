@@ -37,8 +37,15 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
   - Recommended: 8x H200 GPUs for optimal performance
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Git**
+- **Hugging Face Authentication**:
+  - Create a Hugging Face account and generate a token at https://huggingface.co/settings/tokens
+  - Accept the Gemma model terms at https://huggingface.co/google/gemma-3-270m (required for tokenizer access)
+  - Set `HF_TOKEN` environment variable with your token
 - **Cloudflare R2 Bucket Configuration**:
-  - **Dataset Setup**: The current dataset instructions can be found in the [Shared Sharded Dataset](./shared_sharded_dataset.md) doc. Please configure your environment for this change. No pre-download is required, but bucket syncing is optional and recommended.
+  - **Dataset Setup**: Please refer to [Shared Sharded Dataset Documentation](./shared_sharded_dataset.md) for complete dataset setup instructions, including:
+    - R2 bucket settings
+    - Dataset download process
+    - No pre-download is required, but bucket syncing is optional and recommended
   - **Gradient Bucket Setup**:
     1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
     2. **Generate Tokens**:

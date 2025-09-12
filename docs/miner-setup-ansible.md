@@ -1,5 +1,7 @@
 # Miner Setup with Ansible
 
+> ⚠️ **DEPRECATED**: This Ansible setup guide is deprecated and may not be maintained with the latest updates. Please refer to the main [Miner Setup Guide](./miner.md) for the current recommended installation process.
+
 This guide provides an alternative method for setting up Templar miners using Ansible automation. The Ansible playbook automates the deployment process, making it easier to provision miners across multiple hosts or manage multi-GPU configurations.
 
 ## Overview

@@ -53,6 +53,7 @@ from torch.distributed.tensor import distribute_tensor
 import tplr
 from neurons import BaseNode, Trainer
 from neurons.base_node import CPU_COUNT
+from tplr import model_factory
 from tplr.compress import QuantParamsT
 from tplr.distributed import dist_helper
 
@@ -87,6 +88,136 @@ def timer(name: str, wandb_obj=None, step=None, metrics_logger=None):
 
 
 class Validator(BaseNode, Trainer):
+    # ────────────────────────────────────────────────────────────────────
+    # Offload / reload aggregated gather results (CPU pinning helpers)
+    # ────────────────────────────────────────────────────────────────────
+    def offload_gather_results(self, gather_result, *, log: bool = True) -> None:
+        """
+        Move aggregated gather results (gather_result.state_dict) to pinned CPU memory.
+        Call right after idx overlap checking to free GPU memory during evaluation.
+        """
+        if gather_result is None:
+            return
+        if not getattr(self.hparams, "offload_gather_results", True):
+            return
+        if getattr(gather_result, "_offloaded", None) == "cpu":
+            return
+
+        moved_bytes = 0
+        t0 = time.time()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(getattr(self, "device", None))
+
+        state = getattr(gather_result, "state_dict", None)
+        if state is None:
+            return
+
+        def _to_pinned_cpu(obj):
+            nonlocal moved_bytes
+            if torch.is_tensor(obj):
+                if obj.device.type == "cpu":
+                    return obj.pin_memory() if not obj.is_pinned() else obj
+                dst = torch.empty_like(obj, device="cpu", pin_memory=True)
+                dst.copy_(obj, non_blocking=True)
+                moved_bytes += obj.element_size() * obj.numel()
+                return dst
+            if isinstance(obj, list):
+                return [_to_pinned_cpu(x) for x in obj]
+            if isinstance(obj, tuple):
+                return tuple(_to_pinned_cpu(x) for x in obj)
+            if isinstance(obj, dict):
+                return {k: _to_pinned_cpu(v) for k, v in obj.items()}
+            if isinstance(obj, SimpleNamespace):
+                for k, v in vars(obj).items():
+                    setattr(obj, k, _to_pinned_cpu(v))
+                return obj
+            return obj
+
+        # Accept both SimpleNamespace and dict layouts
+        if isinstance(state, SimpleNamespace):
+            _to_pinned_cpu(state)
+        elif isinstance(state, dict):
+            for k, v in list(state.items()):
+                state[k] = _to_pinned_cpu(v)
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(getattr(self, "device", None))
+            torch.cuda.empty_cache()
+        setattr(gather_result, "_offloaded", "cpu")
+
+        if log:
+            tplr.log_with_context(
+                level="info",
+                message=(
+                    "[GatherOffload] aggregator → CPU pinned | moved ~"
+                    f"{moved_bytes / 1e6:.1f} MB in {time.time() - t0:.3f}s"
+                ),
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
+    def load_gather_results_to_device(
+        self, gather_result, device: torch.device, *, log: bool = True
+    ) -> None:
+        """
+        Move aggregated gather results back to the specified device from pinned CPU.
+        Call immediately before outer step.
+        """
+        if gather_result is None:
+            return
+        if getattr(gather_result, "_offloaded", None) != "cpu":
+            return
+
+        moved_bytes = 0
+        t0 = time.time()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+
+        state = getattr(gather_result, "state_dict", None)
+        if state is None:
+            return
+
+        def _to_device(obj):
+            nonlocal moved_bytes
+            if torch.is_tensor(obj):
+                if obj.device == device:
+                    return obj
+                out = obj.to(device=device, non_blocking=True)
+                moved_bytes += obj.element_size() * obj.numel()
+                return out
+            if isinstance(obj, list):
+                return [_to_device(x) for x in obj]
+            if isinstance(obj, tuple):
+                return tuple(_to_device(x) for x in obj)
+            if isinstance(obj, dict):
+                return {k: _to_device(v) for k, v in obj.items()}
+            if isinstance(obj, SimpleNamespace):
+                for k, v in vars(obj).items():
+                    setattr(obj, k, _to_device(v))
+                return obj
+            return obj
+
+        if isinstance(state, SimpleNamespace):
+            _to_device(state)
+        elif isinstance(state, dict):
+            for k, v in list(state.items()):
+                state[k] = _to_device(v)
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+        setattr(gather_result, "_offloaded", None)
+
+        if log:
+            tplr.log_with_context(
+                level="info",
+                message=(
+                    f"[GatherOffload] aggregator → {device.type} | moved ~"
+                    f"{moved_bytes / 1e6:.1f} MB in {time.time() - t0:.3f}s"
+                ),
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
     @staticmethod
     def validator_config():
         parser = argparse.ArgumentParser(description="Validator script")
@@ -284,7 +415,14 @@ class Validator(BaseNode, Trainer):
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
-        self.comms.try_commit(self.wallet, self.bucket)
+
+        # Only master rank tries to commit to avoid multiple attempts
+        if self.is_master:
+            self.comms.try_commit(self.wallet, self.bucket)
+
+        # Ensure all ranks wait for master to complete commit
+        dist_helper.safe_barrier("post_commit", self.local_rank)
+
         # self.comms.fetch_commitments()
 
         # Init state params
@@ -381,9 +519,10 @@ class Validator(BaseNode, Trainer):
         self.outer_steps_per_shard = getattr(self.hparams, "outer_steps_per_shard")
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
-            rank=self.rank,
+            rank=self.local_rank,  # Use local_rank for proper file operations
             world_size=self.world_size,
             comms=self.comms,
+            token_dtype=np.uint32,  # Match preprocessing script dtype
         )
 
         self.burn_uid = 1
@@ -828,10 +967,6 @@ class Validator(BaseNode, Trainer):
             f"Using start_window: {self.start_window}, global_step: {self.global_step}"
         )
 
-        current_shard = self.global_step // self.outer_steps_per_shard
-        _ = await self.dataset_manager.initialize_datasets(current_shard)
-        self.set_dataloader(validator=True)
-
         # Load checkpoint using consolidated logic
         (
             ckpt_ok,
@@ -843,14 +978,24 @@ class Validator(BaseNode, Trainer):
         # If no checkpoint was loaded, initialize model weights now
         if not self.model_initialized:
             tplr.logger.info("No checkpoint loaded, initializing model weights...")
-            # Initialize weights using the same deterministic init as model_factory
-            self.init_model(validator=True, meta=False)
+            # Initialize weights in-place on the existing model
+            model_factory.initialize_weights_inplace(self.model, self.hparams)
             self.model_initialized = True
 
         # Handle catch-up and scheduler replay using consolidated logic
         await tplr.neurons.handle_checkpoint_catchup(
             self, ckpt_ok, ckpt_sync_win, ckpt_global_step, from_bootstrap
         )
+
+        current_shard = self.global_step // self.outer_steps_per_shard
+
+        # Initialize datasets (only rank 0 downloads, handled internally by dataset_manager)
+        _ = await self.dataset_manager.initialize_datasets(current_shard)
+
+        # Synchronize all ranks after dataset initialization
+        dist_helper.safe_barrier("dataset_init_complete", self.local_rank)
+
+        self.set_dataloader(validator=True)
 
         if self.is_master:
             self.comms.start_commitment_fetcher()
@@ -888,6 +1033,7 @@ class Validator(BaseNode, Trainer):
                 tplr.logger.info(f"Swapping dataset at window {self.current_window}")
                 await self.dataset_manager.swap_datasets()
                 self.set_dataloader(validator=True)
+                dist_helper.safe_barrier("sync_shard_switch", self.local_rank)
 
             self.sync_window += 1
             if self.is_master:
@@ -1112,6 +1258,9 @@ class Validator(BaseNode, Trainer):
                         sync_window=self.sync_window,
                         current_window=self.current_window,
                     )
+
+                # Offload aggregated gather results to pinned CPU to free GPU memory
+                self.offload_gather_results(gather_result, log=True)
 
                 skipped_uids = gather_result.skipped_uids
                 success_rate = gather_result.success_rate

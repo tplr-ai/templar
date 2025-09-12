@@ -207,6 +207,10 @@ class TestPrepareGradientDict(unittest.TestCase):
             "param1": torch.zeros(10),
             "param2": torch.zeros(10),
         }
+        self.miner.error_feedback_cpu_buffers = {
+            "param1": torch.zeros(10, pin_memory=False),
+            "param2": torch.zeros(10, pin_memory=False),
+        }
         self.miner.transformer = MagicMock()
         self.miner.compressor = MagicMock()
 

@@ -12,7 +12,7 @@ services:
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
-      - ../${DATASET_BINS_PATH:-remote/tokenized}:/app/${DATASET_BINS_PATH:-remote/tokenized}
+      - ../${DATASET_BINS_PATH:-tokenized}:/app/${DATASET_BINS_PATH:-tokenized}
     environment:
       NODE_TYPE: miner
       WALLET_NAME: ${WALLET_NAME:-miner1}
@@ -40,7 +40,7 @@ services:
       R2_DATASET_BUCKET_NAME: ${R2_DATASET_BUCKET_NAME}
       R2_DATASET_READ_ACCESS_KEY_ID: ${R2_DATASET_READ_ACCESS_KEY_ID}
       R2_DATASET_READ_SECRET_ACCESS_KEY: ${R2_DATASET_READ_SECRET_ACCESS_KEY}
-      DATASET_BINS_PATH: ${DATASET_BINS_PATH:-remote/tokenized/}
+      DATASET_BINS_PATH: ${DATASET_BINS_PATH:-tokenized/}
     deploy:
       resources:
         reservations:
@@ -58,7 +58,7 @@ services:
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
-      - ../${DATASET_BINS_PATH:-remote/tokenized}:/app/${DATASET_BINS_PATH:-remote/tokenized}
+      - ../${DATASET_BINS_PATH:-tokenized}:/app/${DATASET_BINS_PATH:-tokenized}
     environment:
       NODE_TYPE: miner
       WALLET_NAME: ${WALLET_NAME:-miner2}
@@ -86,7 +86,7 @@ services:
       R2_DATASET_BUCKET_NAME: ${R2_DATASET_BUCKET_NAME}
       R2_DATASET_READ_ACCESS_KEY_ID: ${R2_DATASET_READ_ACCESS_KEY_ID}
       R2_DATASET_READ_SECRET_ACCESS_KEY: ${R2_DATASET_READ_SECRET_ACCESS_KEY}
-      DATASET_BINS_PATH: ${DATASET_BINS_PATH:-remote/tokenized/}
+      DATASET_BINS_PATH: ${DATASET_BINS_PATH:-tokenized/}
     deploy:
       resources:
         reservations:
@@ -104,7 +104,7 @@ services:
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
-      - ../${DATASET_BINS_PATH:-remote/tokenized}:/app/${DATASET_BINS_PATH:-remote/tokenized}
+      - ../${DATASET_BINS_PATH:-tokenized}:/app/${DATASET_BINS_PATH:-tokenized}
     environment:
       NODE_TYPE: validator
       WALLET_NAME: ${WALLET_NAME:-validator}
@@ -132,7 +132,7 @@ services:
       R2_DATASET_BUCKET_NAME: ${R2_DATASET_BUCKET_NAME}
       R2_DATASET_READ_ACCESS_KEY_ID: ${R2_DATASET_READ_ACCESS_KEY_ID}
       R2_DATASET_READ_SECRET_ACCESS_KEY: ${R2_DATASET_READ_SECRET_ACCESS_KEY}
-      DATASET_BINS_PATH: ${DATASET_BINS_PATH:-remote/tokenized/}
+      DATASET_BINS_PATH: ${DATASET_BINS_PATH:-tokenized/}
     restart: always
     deploy:
       resources:

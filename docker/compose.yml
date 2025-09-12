@@ -10,8 +10,9 @@ services:
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
-      - ./${DATASET_BINS_PATH:-remote/tokenized}:/app/${DATASET_BINS_PATH:-remote/tokenized}
+      - ./${DATASET_BINS_PATH:-tokenized}:/app/${DATASET_BINS_PATH:-tokenized}
       - ./checkpoints:/app/checkpoints
+      - ./tmp:/tmp
 
     environment:
       - NODE_TYPE=${NODE_TYPE:-miner}
@@ -21,6 +22,7 @@ services:
       - NETWORK=${NETWORK:-finney}
       - DEBUG=${DEBUG:-false}
       - NETUID=${NETUID:-3}
+      - HF_TOKEN=${HF_TOKEN}
       - WANDB_API_KEY=${WANDB_API_KEY}
       - HOST_CUDA_VERSION=12.6
       - TORCH_NCCL_ASYNC_ERROR_HANDLING=1
@@ -42,7 +44,7 @@ services:
       - R2_DATASET_BUCKET_NAME=${R2_DATASET_BUCKET_NAME}
       - R2_DATASET_READ_ACCESS_KEY_ID=${R2_DATASET_READ_ACCESS_KEY_ID}
       - R2_DATASET_READ_SECRET_ACCESS_KEY=${R2_DATASET_READ_SECRET_ACCESS_KEY}
-      - DATASET_BINS_PATH=${DATASET_BINS_PATH:-remote/tokenized/}
+      - DATASET_BINS_PATH=${DATASET_BINS_PATH:-tokenized/}
     deploy:
       resources:
         reservations:
@@ -71,6 +73,7 @@ services:
       - NETWORK=${NETWORK:-finney}
       - DEBUG=${DEBUG:-false}
       - NETUID=${NETUID:-3}
+      - HF_TOKEN=${HF_TOKEN}
       - WANDB_API_KEY=${WANDB_API_KEY}
       - HOST_CUDA_VERSION=12.6
       - EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-4}
@@ -91,7 +94,7 @@ services:
       - R2_DATASET_BUCKET_NAME=${R2_DATASET_BUCKET_NAME}
       - R2_DATASET_READ_ACCESS_KEY_ID=${R2_DATASET_READ_ACCESS_KEY_ID}
       - R2_DATASET_READ_SECRET_ACCESS_KEY=${R2_DATASET_READ_SECRET_ACCESS_KEY}
-      - DATASET_BINS_PATH=${DATASET_BINS_PATH:-remote/tokenized/}
+      - DATASET_BINS_PATH=${DATASET_BINS_PATH:-tokenized/}
       - CUSTOM_EVAL_PATH=${CUSTOM_EVAL_PATH:-eval_dataset}
       - EVAL_INTERVAL=${EVAL_INTERVAL:-600}
       - EVAL_TASKS=${EVAL_TASKS:-arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag,mmlu}

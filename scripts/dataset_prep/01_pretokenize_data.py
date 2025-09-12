@@ -47,16 +47,16 @@ def tokenize_doc(doc):
     text = doc.get("text")
 
     if not text or not isinstance(text, str):
-        return np.array([], dtype=np.uint16)
+        return np.array([], dtype=np.uint32)
 
     tokens = _tokenizer.encode(text, add_special_tokens=False)
     tokens.append(_tokenizer.eos_token_id)
 
-    tokens_array = np.array(tokens, dtype=np.uint16)
+    tokens_array = np.array(tokens, dtype=np.uint32)
 
-    if not ((0 <= tokens_array) & (tokens_array < 2**16)).all():
+    if (tokens_array >= _tokenizer.vocab_size).any():
         raise ValueError(
-            f"Token IDs exceed uint16 range. Vocab size: {_tokenizer.vocab_size}"
+            f"Token IDs exceed vocab size. Vocab size: {_tokenizer.vocab_size}"
         )
 
     return tokens_array
@@ -93,9 +93,13 @@ def save_shard(shard_buffer, shard_idx, tokens_in_shard, args):
 
 
 def main(args):
-    target_tokens = args.total_tokens
+    if args.start_shard >= args.end_shard:
+        print("Error: --start_shard must be less than --end_shard")
+        return
+
+    target_tokens = (args.end_shard - args.start_shard) * args.shard_size
     shard_size = args.shard_size
-    expected_shards = math.ceil(target_tokens / shard_size)
+    expected_shards = args.end_shard - args.start_shard
 
     args.r2_endpoint_url = f"https://{args.r2_endpoint_url}.r2.cloudflarestorage.com"
 
@@ -161,6 +165,9 @@ def main(args):
         args.dataset, split="train", streaming=True, trust_remote_code=True
     )
     dataset = dataset.shuffle(seed=args.seed, buffer_size=args.buffer_size)
+    if args.skip_docs > 0:
+        print(f"Skipping {args.skip_docs} documents.")
+        dataset = dataset.skip(args.skip_docs)
 
     num_proc = (
         args.num_proc
@@ -170,10 +177,10 @@ def main(args):
     print(f"Using {num_proc} processes")
 
     # Initialize processing variables
-    shard_idx = existing_count
-    shard_buffer = np.empty(shard_size, dtype=np.uint16)
+    shard_idx = args.start_shard
+    shard_buffer = np.empty(shard_size, dtype=np.uint32)
     tokens_in_shard = 0
-    total_tokens = shard_idx * shard_size
+    total_tokens = 0
 
     r2_init_args = {
         "bucket": args.r2_bucket,
@@ -192,7 +199,8 @@ def main(args):
             for doc_tokens in pool.imap(
                 tokenize_doc, iter(dataset), chunksize=args.chunk_size
             ):
-                if total_tokens >= target_tokens:
+                if shard_idx >= args.end_shard:
+                    print(f"Reached end_shard {args.end_shard}, stopping.")
                     break
 
                 if len(doc_tokens) == 0:
@@ -200,12 +208,11 @@ def main(args):
 
                 # Process tokens from this document
                 doc_idx = 0
-                while doc_idx < len(doc_tokens) and total_tokens < target_tokens:
+                while doc_idx < len(doc_tokens) and shard_idx < args.end_shard:
                     space_left = shard_size - tokens_in_shard
                     doc_left = len(doc_tokens) - doc_idx
-                    global_left = target_tokens - total_tokens
 
-                    take = min(space_left, doc_left, global_left)
+                    take = min(space_left, doc_left)
                     if take == 0:
                         break
 
@@ -243,7 +250,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--tokenizer",
-        default="togethercomputer/LLaMA-2-7B-32K",
+        default="google/gemma-3-270m",
         help="Transformers tokenizer",
     )
     parser.add_argument(
@@ -260,7 +267,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--r2_prefix",
-        default="remote/tokenized/",
+        default="tokenized/",
         help="R2 prefix for shards",
     )
     parser.add_argument(
@@ -288,7 +295,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--total_tokens",
         type=int,
-        default=1000 * (1024**3),  # 1T tokens
+        default=1400 * (1024**3),  # 1T tokens
         help="Total tokens to process (default: 1T)",
     )
 
@@ -304,6 +311,15 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--chunk_size", type=int, default=256, help="Processing chunk size"
+    )
+    parser.add_argument(
+        "--start_shard", type=int, default=0, help="Starting shard index"
+    )
+    parser.add_argument(
+        "--end_shard", type=int, default=14, help="Ending shard index (exclusive)"
+    )
+    parser.add_argument(
+        "--skip_docs", type=int, default=0, help="Number of documents to skip"
     )
 
     args = parser.parse_args()

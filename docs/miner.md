@@ -37,8 +37,15 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
   - Recommended: 8x H200 GPUs for optimal performance
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Git**
+- **Hugging Face Authentication**:
+  - Create a Hugging Face account and generate a token at https://huggingface.co/settings/tokens
+  - Accept the Gemma model terms at https://huggingface.co/google/gemma-3-270m (required for tokenizer access)
+  - Set `HF_TOKEN` environment variable with your token
 - **Cloudflare R2 Bucket Configuration**:
-  - **Dataset Setup**: The current dataset instructions can be found in the [Shared Sharded Dataset](./shared_sharded_datset.md) doc. Please configure your environment for this change. No pre-download is required, but bucket syncing is optional and recommended.
+  - **Dataset Setup**: Please refer to [Shared Sharded Dataset Documentation](./shared_sharded_dataset.md) for complete dataset setup instructions, including:
+    - R2 bucket settings
+    - Dataset download process
+    - No pre-download is required, but bucket syncing is optional and recommended
   - **Gradient Bucket Setup**:
     1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
     2. **Generate Tokens**:
@@ -145,6 +152,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    Export necessary environment variables or create a `.env` file in the project root.
 
    ```bash
+   export HF_TOKEN=your_huggingface_token  # Required for tokenizer access
    export WANDB_API_KEY=your_wandb_api_key
    export INFLUXDB_TOKEN=your_influxdb_token
    export NODE_TYPE=your_node_type
@@ -166,10 +174,10 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    # Dataset R2 credentials - You may set up your own Shared Sharded Dataset, but must at minimum set these keys
    # See docs/shared_sharded_dataset.md for instructions
    export R2_DATASET_ACCOUNT_ID="8af7f92a8a0661cf7f1ac0420c932980"
-   export R2_DATASET_BUCKET_NAME="dataset-migration"
-   export R2_DATASET_READ_ACCESS_KEY_ID="5c42b46cfe147cd175295eb78500c291"
-   export R2_DATASET_READ_SECRET_ACCESS_KEY="40900cbd916b47c1012396afdd29ee6cae39606ad334886849944dd03362f42d"
-   export DATASET_BINS_PATH="remote/tokenized/"
+   export R2_DATASET_BUCKET_NAME="gemma-migration"
+   export R2_DATASET_READ_ACCESS_KEY_ID="a733fac6c32a549e0d48f9f7cf67d758"
+   export R2_DATASET_READ_SECRET_ACCESS_KEY="f50cab456587f015ad21c48c3e23c7ff0e6f1ad5a22c814c3a50d1a4b7c76bb9"
+   export DATASET_BINS_PATH="tokenized/"
 
 
    # Aggregator R2 credentials
@@ -217,6 +225,9 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 When using Docker Compose, set the following variables in the `docker/.env` file:
 
 ```dotenv:docker/.env
+# Required: Hugging Face token for tokenizer access
+HF_TOKEN=your_huggingface_token
+
 # Add your Weights & Biases API key
 WANDB_API_KEY=your_wandb_api_key
 INFLUXDB_TOKEN=your_influxdb_token

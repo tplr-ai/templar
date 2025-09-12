@@ -58,6 +58,9 @@ class DummyMiner:
         self.model = DummyModel()
         self.hparams = DummyHparams()
         self.error_feedback = {"weight": torch.zeros_like(self.model.weight)}
+        self.error_feedback_cpu_buffers = {
+            "weight": torch.zeros_like(self.model.weight, pin_memory=False)
+        }
         self.owned_params = {"weight", "weight1", "weight2"}
         self.compressor = DummyCompressor()
         self.transformer = DummyTransformer()

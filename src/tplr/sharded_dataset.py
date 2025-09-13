@@ -122,18 +122,47 @@ class SharedShardedDataset(Dataset):
             token_dtype: The numpy data type of the tokens.
         """
         # ────────────────────────── mmap tokens & ids ───────────────────────────
-        # Normalise once for safety; still type-checks
-        tokens_mem = np.memmap(self.tokens_file, dtype=np.dtype(token_dtype), mode="r+")
-        tokens_mem.flags.writeable = True
-        self.tokens = torch.from_numpy(tokens_mem)
-        tokens_mem.flags.writeable = False
+        tokens_path = Path(self.tokens_file)
+        ids_path = Path(self.ids_file)
 
-        ids_mem = np.memmap(self.ids_file, dtype=np.uint64, mode="r+")
-        ids_mem.flags.writeable = True
+        # Tokens: support .npy (NumPy format) and raw .bin
+        if tokens_path.suffix == ".npy":
+            # Correct way to memory-map a NumPy .npy file
+            arr = np.load(tokens_path, mmap_mode="r", allow_pickle=False)
+            # Ensure dtype is uint32 (no copy if already correct)
+            if arr.dtype != np.uint32:
+                arr = arr.astype(np.uint32, copy=False)
+            tokens_mem = arr
+        else:
+            # Raw binary: assume little-endian uint32 from preprocessing
+            tokens_mem = np.memmap(tokens_path, dtype=np.dtype("<u4"), mode="r")
+
+        # IDs sidecar: always raw binary uint64 little-endian
+        ids_mem = np.memmap(ids_path, dtype=np.dtype("<u8"), mode="r")
+
+        # Wrap as torch tensors (zero-copy views)
+        self.tokens = torch.from_numpy(tokens_mem)  # dtype: torch.uint32
         self.sample_ids = torch.from_numpy(ids_mem).to(torch.uint64)
-        ids_mem.flags.writeable = False
 
-        self.total_samples = len(self.sample_ids)
+        # Basic sanity: tokens length should be multiple of seqlen
+        total_tokens = int(self.tokens.shape[0])
+        if total_tokens % self.seqlen != 0:
+            raise ValueError(
+                f"Token file length ({total_tokens}) not divisible by seqlen ({self.seqlen}). "
+                f"File: {self.tokens_file}"
+            )
+
+        # The authoritative sample count comes from ids file
+        self.total_samples = int(self.sample_ids.shape[0])
+
+        # Optional cross-check (warn if mismatch rather than crash)
+        expected_tokens = self.total_samples * self.seqlen
+        if expected_tokens != total_tokens:
+            tplr.logger.warning(
+                f"[Dataset] tokens != ids*seqlen: tokens={total_tokens}, "
+                f"ids={self.total_samples}, seqlen={self.seqlen} (file: {self.tokens_file})"
+            )
+
         return
 
     def __len__(self):

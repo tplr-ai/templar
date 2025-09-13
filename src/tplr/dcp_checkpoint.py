@@ -303,6 +303,10 @@ class DCPCheckpointer:
             t_all = time.perf_counter()
             world, r = _world(), _rank()
 
+            # Small delay to ensure all files are properly written to disk
+            # This helps prevent race conditions where files may still be in write buffers
+            await asyncio.sleep(10.0)
+
             # Take a snapshot of what's on disk right now.
             files = [p for p in local_dir.iterdir() if p.is_file()]
             data_files = [q for q in files if not _is_meta(q)]

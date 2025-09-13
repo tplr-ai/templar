@@ -24,13 +24,13 @@ import os
 import random
 import sys
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
 from types import SimpleNamespace
-from typing import cast
+from typing import Deque, cast
 
 import bittensor as bt
 import numpy as np
@@ -53,6 +53,8 @@ from torch.distributed.tensor import distribute_tensor
 import tplr
 from neurons import BaseNode, Trainer
 from neurons.base_node import CPU_COUNT
+from tplr import model_factory
+from tplr.compress import QuantParamsT
 from tplr.distributed import dist_helper
 
 # GPU optimizations.
@@ -64,21 +66,6 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-
-# Set CUDA memory allocator configuration to prevent fragmentation
-import os
-if not os.environ.get('PYTORCH_CUDA_ALLOC_CONF'):
-    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-
-# Set NCCL environment variables for better memory management and debugging
-if not os.environ.get('NCCL_DEBUG'):
-    os.environ['NCCL_DEBUG'] = 'WARN'  # Change to INFO for more verbose debugging
-if not os.environ.get('NCCL_IB_DISABLE'):
-    os.environ['NCCL_IB_DISABLE'] = '1'  # Disable InfiniBand to use Ethernet
-if not os.environ.get('NCCL_SOCKET_IFNAME'):
-    os.environ['NCCL_SOCKET_IFNAME'] = 'eth0'  # Use ethernet interface
-if not os.environ.get('NCCL_P2P_DISABLE'):
-    os.environ['NCCL_P2P_DISABLE'] = '1'  # Disable P2P to reduce memory pressure
 
 
 class NullMetricsLogger:
@@ -101,6 +88,136 @@ def timer(name: str, wandb_obj=None, step=None, metrics_logger=None):
 
 
 class Validator(BaseNode, Trainer):
+    # ────────────────────────────────────────────────────────────────────
+    # Offload / reload aggregated gather results (CPU pinning helpers)
+    # ────────────────────────────────────────────────────────────────────
+    def offload_gather_results(self, gather_result, *, log: bool = True) -> None:
+        """
+        Move aggregated gather results (gather_result.state_dict) to pinned CPU memory.
+        Call right after idx overlap checking to free GPU memory during evaluation.
+        """
+        if gather_result is None:
+            return
+        if not getattr(self.hparams, "offload_gather_results", True):
+            return
+        if getattr(gather_result, "_offloaded", None) == "cpu":
+            return
+
+        moved_bytes = 0
+        t0 = time.time()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(getattr(self, "device", None))
+
+        state = getattr(gather_result, "state_dict", None)
+        if state is None:
+            return
+
+        def _to_pinned_cpu(obj):
+            nonlocal moved_bytes
+            if torch.is_tensor(obj):
+                if obj.device.type == "cpu":
+                    return obj.pin_memory() if not obj.is_pinned() else obj
+                dst = torch.empty_like(obj, device="cpu", pin_memory=True)
+                dst.copy_(obj, non_blocking=True)
+                moved_bytes += obj.element_size() * obj.numel()
+                return dst
+            if isinstance(obj, list):
+                return [_to_pinned_cpu(x) for x in obj]
+            if isinstance(obj, tuple):
+                return tuple(_to_pinned_cpu(x) for x in obj)
+            if isinstance(obj, dict):
+                return {k: _to_pinned_cpu(v) for k, v in obj.items()}
+            if isinstance(obj, SimpleNamespace):
+                for k, v in vars(obj).items():
+                    setattr(obj, k, _to_pinned_cpu(v))
+                return obj
+            return obj
+
+        # Accept both SimpleNamespace and dict layouts
+        if isinstance(state, SimpleNamespace):
+            _to_pinned_cpu(state)
+        elif isinstance(state, dict):
+            for k, v in list(state.items()):
+                state[k] = _to_pinned_cpu(v)
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(getattr(self, "device", None))
+            torch.cuda.empty_cache()
+        setattr(gather_result, "_offloaded", "cpu")
+
+        if log:
+            tplr.log_with_context(
+                level="info",
+                message=(
+                    "[GatherOffload] aggregator → CPU pinned | moved ~"
+                    f"{moved_bytes / 1e6:.1f} MB in {time.time() - t0:.3f}s"
+                ),
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
+    def load_gather_results_to_device(
+        self, gather_result, device: torch.device, *, log: bool = True
+    ) -> None:
+        """
+        Move aggregated gather results back to the specified device from pinned CPU.
+        Call immediately before outer step.
+        """
+        if gather_result is None:
+            return
+        if getattr(gather_result, "_offloaded", None) != "cpu":
+            return
+
+        moved_bytes = 0
+        t0 = time.time()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+
+        state = getattr(gather_result, "state_dict", None)
+        if state is None:
+            return
+
+        def _to_device(obj):
+            nonlocal moved_bytes
+            if torch.is_tensor(obj):
+                if obj.device == device:
+                    return obj
+                out = obj.to(device=device, non_blocking=True)
+                moved_bytes += obj.element_size() * obj.numel()
+                return out
+            if isinstance(obj, list):
+                return [_to_device(x) for x in obj]
+            if isinstance(obj, tuple):
+                return tuple(_to_device(x) for x in obj)
+            if isinstance(obj, dict):
+                return {k: _to_device(v) for k, v in obj.items()}
+            if isinstance(obj, SimpleNamespace):
+                for k, v in vars(obj).items():
+                    setattr(obj, k, _to_device(v))
+                return obj
+            return obj
+
+        if isinstance(state, SimpleNamespace):
+            _to_device(state)
+        elif isinstance(state, dict):
+            for k, v in list(state.items()):
+                state[k] = _to_device(v)
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+        setattr(gather_result, "_offloaded", None)
+
+        if log:
+            tplr.log_with_context(
+                level="info",
+                message=(
+                    f"[GatherOffload] aggregator → {device.type} | moved ~"
+                    f"{moved_bytes / 1e6:.1f} MB in {time.time() - t0:.3f}s"
+                ),
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
     @staticmethod
     def validator_config():
         parser = argparse.ArgumentParser(description="Validator script")
@@ -158,12 +275,6 @@ class Validator(BaseNode, Trainer):
         """Save model state efficiently using torch distributed checkpoint utilities.
         Returns state dict with tensors offloaded to CPU.
         """
-        # Clear GPU cache before saving to ensure maximum available memory
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            import gc
-            gc.collect()
-            
         # Get model state dict with local shards only, already on CPU
         # cpu_offload=True means tensors are moved to CPU
         # full_state_dict=False means we only save local DTensor shards
@@ -174,80 +285,12 @@ class Validator(BaseNode, Trainer):
                 cpu_offload=True,  # Automatically offload to CPU
             ),
         )
-        
-        # Force memory cleanup after state dict creation
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            
         return state_dict
-
-    def _check_memory_and_cleanup(self, context: str = "unknown") -> bool:
-        """Check GPU memory usage and perform cleanup if needed.
-        Returns True if memory is available, False if critically low.
-        """
-        if not torch.cuda.is_available():
-            return True
-            
-        # Get memory info
-        memory_allocated = torch.cuda.memory_allocated()
-        memory_reserved = torch.cuda.memory_reserved()
-        memory_total = torch.cuda.get_device_properties(0).total_memory
-        
-        # Calculate usage percentages
-        allocated_pct = (memory_allocated / memory_total) * 100
-        reserved_pct = (memory_reserved / memory_total) * 100
-        
-        # Log memory usage
-        if self.is_master:
-            tplr.log_with_context(
-                level="debug",
-                message=f"Memory check ({context}) - Allocated: {allocated_pct:.1f}% ({memory_allocated/1024**3:.2f}GB), "
-                        f"Reserved: {reserved_pct:.1f}% ({memory_reserved/1024**3:.2f}GB)",
-                sync_window=self.sync_window,
-                current_window=self.current_window,
-            )
-        
-        # If allocated memory is over 85%, perform cleanup
-        if allocated_pct > 85.0:
-            if self.is_master:
-                tplr.log_with_context(
-                    level="warning",
-                    message=f"High memory usage detected ({allocated_pct:.1f}%), performing cleanup",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-            torch.cuda.empty_cache()
-            import gc
-            gc.collect()
-            torch.cuda.synchronize()
-            
-            # Check again after cleanup
-            new_allocated = torch.cuda.memory_allocated()
-            new_allocated_pct = (new_allocated / memory_total) * 100
-            
-            # If still critically low after cleanup, return False
-            if new_allocated_pct > 90.0:
-                if self.is_master:
-                    tplr.log_with_context(
-                        level="error",
-                        message=f"Critical memory usage even after cleanup ({new_allocated_pct:.1f}%)",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                return False
-                
-        return True
 
     def _restore_model_state(self, state_dict):
         """Restore model state from saved state dict.
         Handles DTensor and regular tensors efficiently.
         """
-        # Clear GPU cache before restoring to ensure maximum available memory
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            import gc
-            gc.collect()
-            
         # set_model_state_dict handles moving from CPU to device and DTensor reconstruction
         set_model_state_dict(
             self.model,
@@ -257,10 +300,6 @@ class Validator(BaseNode, Trainer):
                 strict=True,  # Ensure all keys match
             ),
         )
-        
-        # Force memory cleanup after state dict restoration
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
     def __init__(self):
         tplr.logger.debug("Starting initialization...")
@@ -326,7 +365,11 @@ class Validator(BaseNode, Trainer):
         self.device = torch.device(self.config.device)
         tplr.logger.info(f"[Init] device set → {self.device}")
 
-        self.init_model(validator=True)
+        # Initialize model on meta device first
+        self.init_model(validator=True, meta=True)
+        # Move model from meta to actual device (allocates memory but no initialization)
+        self.model = self.model.to_empty(device=str(self.device))
+        self.model_initialized = False  # Track if model has actual weights
         self.ckpt = tplr.DCPCheckpointer(
             self.comms, uid=self.uid, version=tplr.__version__
         )
@@ -348,9 +391,7 @@ class Validator(BaseNode, Trainer):
 
         self.xshapes = {}
         self.totalks = {}
-        # Use bare_model like the miner does to ensure consistent parameter iteration
         for n, p in self.model.named_parameters():
-            # Use the same approach as miner for creating xshapes and totalks
             enc = self.transformer.encode(
                 torch.empty(p.shape, dtype=torch.float16, device=self.device),
                 use_dct=self.hparams.use_dct,
@@ -374,7 +415,14 @@ class Validator(BaseNode, Trainer):
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
-        self.comms.try_commit(self.wallet, self.bucket)
+
+        # Only master rank tries to commit to avoid multiple attempts
+        if self.is_master:
+            self.comms.try_commit(self.wallet, self.bucket)
+
+        # Ensure all ranks wait for master to complete commit
+        dist_helper.safe_barrier("post_commit", self.local_rank)
+
         # self.comms.fetch_commitments()
 
         # Init state params
@@ -400,24 +448,22 @@ class Validator(BaseNode, Trainer):
         self.previous_avg_loss_after_own = 0.0
         self.previous_avg_loss_before_random = 0.0
         self.previous_avg_loss_after_random = 0.0
-        self.valid_score_indices = []
 
         # Caching
         self.state_path = f"validator-state-{tplr.__version__}.pt"
+
+        # Initialize state tensors with zeros - will be overwritten by load_state on master
+        d = self.device
+        self.gradient_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.sync_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.final_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.binary_moving_averages = torch.zeros(256, dtype=torch.float32, device=d)
+        self.weights = torch.zeros(256, dtype=torch.float32, device=d)
+
+        # Master rank loads existing state if available
         if os.path.isfile(self.state_path):
-            self.load_state()
-        else:
-            d = self.device
-            self.gradient_scores = torch.zeros(256, dtype=torch.float32, device=d)
-            self.sync_scores = torch.zeros(256, dtype=torch.float32, device=d)
-            self.binary_indicator_scores = torch.zeros(
-                256, dtype=torch.float32, device=d
-            )
-            self.final_scores = torch.zeros(256, dtype=torch.float32, device=d)
-            self.binary_moving_averages = torch.zeros(
-                256, dtype=torch.float32, device=d
-            )
-            self.weights = torch.zeros(256, dtype=torch.float32, device=d)
+            self.load_state()  # Only executes on master rank due to check in load_state()
         self.evaluated_uids = set()
 
         # Add step tracking
@@ -470,15 +516,20 @@ class Validator(BaseNode, Trainer):
         self.prev_param_state: dict[str, torch.Tensor] = {}
         self.param_change_alpha = 0.2
 
-        self.windows_per_shard = getattr(self.hparams, "windows_per_shard")
+        self.outer_steps_per_shard = getattr(self.hparams, "outer_steps_per_shard")
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
-            rank=self.rank,
+            rank=self.local_rank,  # Use local_rank for proper file operations
             world_size=self.world_size,
             comms=self.comms,
+            token_dtype=np.uint32,  # Match preprocessing script dtype
         )
 
         self.burn_uid = 1
+
+        # Track negative evaluation history for each peer (last 20 evaluations)
+        self.peer_eval_history: dict[int, Deque[bool]] = {}
+        self.eval_history_limit = 20  # Track last 20 evaluations per peer
 
     def reset_peer(self, uid: int) -> None:
         """
@@ -496,7 +547,51 @@ class Validator(BaseNode, Trainer):
         self.openskill_ratings.pop(uid, None)
         self.eval_peers.pop(uid, None)
         self.inactive_scores.pop(uid, None)
+        self.peer_eval_history.pop(uid, None)
         return
+
+    def track_negative_evaluation(self, eval_uid: int) -> None:
+        """
+        Track negative evaluation history for a peer over the last N evaluations.
+        Stores True for negative, False for positive. Frequency = mean(history).
+        """
+        # --- get score safely
+        is_negative = bool(self.gradient_scores[eval_uid] < 0)
+
+        # --- init on first use
+        if eval_uid not in self.peer_eval_history:
+            self.peer_eval_history[eval_uid] = deque(maxlen=self.eval_history_limit)
+
+        window = self.peer_eval_history[eval_uid]
+
+        # --- update window
+        window.append(is_negative)
+
+        # --- compute stats
+        total = len(window)
+        neg_count = sum(window)  # True==1, False==0
+        negative_freq = (neg_count / total) if total else 0.0
+
+        # --- logging (consider rate limiting in practice)
+        tplr.log_with_context(
+            level="info",
+            message=(
+                f"UID {eval_uid} negative eval frequency: "
+                f"{neg_count}/{total} ({negative_freq:.1%}) in last {total} evals"
+            ),
+            sync_window=self.sync_window,
+            current_window=self.current_window,
+            eval_uid=eval_uid,
+        )
+
+        self.wandb.log(
+            {
+                f"validator/negative_eval/count/{eval_uid}": neg_count,
+                f"validator/negative_eval/frequency/{eval_uid}": negative_freq,
+                f"validator/negative_eval/total_evals/{eval_uid}": total,
+            },
+            step=self.global_step,
+        )
 
     def log_sync_score(
         self, eval_uid: int, sync_result: dict[str, bool | float | int | str]
@@ -813,68 +908,94 @@ class Validator(BaseNode, Trainer):
             self.comms.peers = self.config.peers
 
         # Only master fetches commitments and updates peers
+        self.comms.commitments = await self.comms.get_commitments()
         if self.is_master:
-            self.comms.commitments = await self.comms.get_commitments()
             self.comms.update_peers_with_buckets()
             tplr.logger.info("Loaded commitments")
-        else:
-            self.comms.commitments = {}
 
+        tensor = torch.tensor([0], dtype=torch.long, device=self.device)
         # Handle start_window similar to miner - only master rank checks and posts
         if self.is_master:
+            peer_start = tplr.T()
+            await tplr.neurons.update_peers(
+                instance=self, window=self.current_window, peer_start=peer_start
+            )
+
             # Only post start window if you are the highest stake validator
             if self.uid == self.comms.metagraph.S.argmax().item():
                 # Check if an existing start window already exists
                 try:
-                    existing_start_window = await self.comms.get_start_window(retries=2)
+                    start_window = await self.comms.get_start_window(retries=2)
                 except Exception as e:
                     tplr.logger.warning(f"Error fetching existing start_window: {e}")
-                    existing_start_window = None
+                    start_window = None
 
-                if existing_start_window is not None:
-                    self.start_window = existing_start_window
+                if start_window is not None:
                     tplr.logger.info(
-                        f"Highest staked validator found existing start_window: {self.start_window}"
+                        f"Highest staked validator found existing start_window: {start_window}"
                     )
                 else:
                     # No existing start window, so post new start window to R2
                     await self.comms.post_start_window(cast(int, self.start_window))
+                    start_window = self.start_window
                     tplr.logger.info(
-                        f"This validator is the highest staked. Posted start_window: {self.start_window}"
+                        f"This validator is the highest staked. Posted start_window: {start_window}"
                     )
             else:
                 tplr.logger.info(
                     "This validator is not the highest staked. Waiting to fetch start_window."
                 )
-                self.start_window = await self.comms.get_start_window()
+                start_window = await self.comms.get_start_window()
 
             # Broadcast start_window to all ranks if distributed
-            val = -1 if self.start_window is None else self.start_window
+            val = -1 if start_window is None else start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
-            dist_helper.broadcast(tensor, src=0)
-        else:
-            # Non-master ranks receive start_window via broadcast
-            tensor = torch.tensor([0], dtype=torch.long, device=self.device)
-            dist_helper.broadcast(tensor, src=0)
-            val = tensor.item()
-            self.start_window = None if val == -1 else int(val)
 
-        if self.start_window is None:
+        dist_helper.broadcast(tensor, src=0)
+        val = tensor.item()
+        start_window = None if val == -1 else int(val)
+
+        if start_window is None:
             raise RuntimeError(
                 "Could not find a valid start window. This should not be possible."
             )
+        self.start_window = start_window
 
-        self.global_step = self.current_window - self.start_window
+        # global_step tracks actual outer steps performed (starts at 0)
+        self.global_step = 0
         tplr.logger.info(
             f"Using start_window: {self.start_window}, global_step: {self.global_step}"
         )
 
-        current_shard = self.global_step // self.windows_per_shard
-        _ = await self.dataset_manager.initialize_datasets(current_shard)
-        self.set_dataloader(validator=True)
+        # Load checkpoint using consolidated logic
+        (
+            ckpt_ok,
+            ckpt_sync_win,
+            ckpt_global_step,
+            from_bootstrap,
+        ) = await tplr.neurons.load_checkpoint_with_fallback(self)
 
-        # Load the most recent checkpoint
-        _ = await self.load_checkpoint()
+        # If no checkpoint was loaded, initialize model weights now
+        if not self.model_initialized:
+            tplr.logger.info("No checkpoint loaded, initializing model weights...")
+            # Initialize weights in-place on the existing model
+            model_factory.initialize_weights_inplace(self.model, self.hparams)
+            self.model_initialized = True
+
+        # Handle catch-up and scheduler replay using consolidated logic
+        await tplr.neurons.handle_checkpoint_catchup(
+            self, ckpt_ok, ckpt_sync_win, ckpt_global_step, from_bootstrap
+        )
+
+        current_shard = self.global_step // self.outer_steps_per_shard
+
+        # Initialize datasets (only rank 0 downloads, handled internally by dataset_manager)
+        _ = await self.dataset_manager.initialize_datasets(current_shard)
+
+        # Synchronize all ranks after dataset initialization
+        dist_helper.safe_barrier("dataset_init_complete", self.local_rank)
+
+        self.set_dataloader(validator=True)
 
         if self.is_master:
             self.comms.start_commitment_fetcher()
@@ -904,16 +1025,21 @@ class Validator(BaseNode, Trainer):
             # 2. Increment sync window and update peer lists
             window_start = tplr.T()
 
-            if self.global_step > 0 and self.global_step % self.windows_per_shard == 0:
+            # Check if we need to swap dataset based on actual outer steps taken
+            if (
+                self.global_step > 0
+                and self.global_step % self.outer_steps_per_shard == 0
+            ):
                 tplr.logger.info(f"Swapping dataset at window {self.current_window}")
                 await self.dataset_manager.swap_datasets()
                 self.set_dataloader(validator=True)
+                dist_helper.safe_barrier("sync_shard_switch", self.local_rank)
 
             self.sync_window += 1
             if self.is_master:
                 tplr.log_with_context(
                     level="info",
-                    message=f"Sync Window: {self.sync_window}, Global step: {self.global_step}",
+                    message=f"Sync Window: {self.sync_window}, Outer Steps Taken: {self.global_step}",
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
@@ -1064,7 +1190,7 @@ class Validator(BaseNode, Trainer):
                     reserve_uids=self.comms.reserve_peers,
                     window=self.sync_window,
                     key="gradient",
-                    timeout=75,
+                    timeout=90,
                     device=cast(str, self.device),
                     local=False,
                     totalks=self.totalks,
@@ -1091,7 +1217,6 @@ class Validator(BaseNode, Trainer):
             skip_window = bool(skip_tensor.item())
 
             if skip_window:
-                self.global_step += 1
                 continue
 
             # --------------------------------------------------------------+
@@ -1133,6 +1258,9 @@ class Validator(BaseNode, Trainer):
                         sync_window=self.sync_window,
                         current_window=self.current_window,
                     )
+
+                # Offload aggregated gather results to pinned CPU to free GPU memory
+                self.offload_gather_results(gather_result, log=True)
 
                 skipped_uids = gather_result.skipped_uids
                 success_rate = gather_result.success_rate
@@ -1207,7 +1335,6 @@ class Validator(BaseNode, Trainer):
             has_peers = has_peers_tensor.item()
 
             if not has_peers:
-                self.global_step += 1
                 continue
 
             # Barrier before evaluation starts (soft)
@@ -1294,69 +1421,11 @@ class Validator(BaseNode, Trainer):
             loss_before_random: float
             n_batches: int
 
-            # Clear GPU memory before evaluation to prevent OOM
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-                # Add memory check and force garbage collection
-                import gc
-                gc.collect()
-                # Log memory usage for debugging
-                if self.is_master:
-                    memory_allocated = torch.cuda.memory_allocated() / 1024**3
-                    memory_reserved = torch.cuda.memory_reserved() / 1024**3
-                    tplr.log_with_context(
-                        level="debug",
-                        message=f"GPU memory before evaluation - Allocated: {memory_allocated:.2f}GB, Reserved: {memory_reserved:.2f}GB",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-
             # Loss before random data
             self.sampler.set_window_uid(random_seed, self.sync_window)
-            
-            # Check memory before baseline evaluation
-            if not self._check_memory_and_cleanup("before_baseline_eval"):
-                if self.is_master:
-                    tplr.log_with_context(
-                        level="critical",
-                        message="Insufficient memory for baseline evaluation. Skipping evaluation window.",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                continue
-                
-            try:
-                loss_before_random, n_batches = await self.evaluate_model(
-                    self.model, self.loader
-                )
-            except torch.cuda.OutOfMemoryError as e:
-                if self.is_master:
-                    tplr.log_with_context(
-                        level="error",
-                        message=f"CUDA OOM during random baseline evaluation: {e}. Attempting memory cleanup and retry.",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                # Aggressive memory cleanup
-                torch.cuda.empty_cache()
-                import gc
-                gc.collect()
-                # Try one more time with smaller batch size or exit gracefully
-                try:
-                    loss_before_random, n_batches = await self.evaluate_model(
-                        self.model, self.loader
-                    )
-                except torch.cuda.OutOfMemoryError:
-                    if self.is_master:
-                        tplr.log_with_context(
-                            level="critical",
-                            message="Persistent CUDA OOM during baseline evaluation. Skipping evaluation window.",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                        )
-                    # Skip this evaluation window entirely
-                    continue
+            loss_before_random, n_batches = await self.evaluate_model(
+                self.model, self.loader
+            )
             self.loss_before_per_batch_random = (
                 loss_before_random / n_batches if n_batches > 0 else 0
             )
@@ -1417,19 +1486,6 @@ class Validator(BaseNode, Trainer):
             # Process each UID with sliding window loading
             for eval_uid in evaluation_uids:
                 uid_eval_start = time.time()
-                
-                # Check memory before each UID evaluation
-                if not self._check_memory_and_cleanup(f"before_uid_{eval_uid}"):
-                    if self.is_master:
-                        tplr.log_with_context(
-                            level="warning",
-                            message=f"Insufficient memory for UID {eval_uid} evaluation. Skipping this UID.",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
-                    continue
-                    
                 # Check if window has changed before starting evaluation
                 if self.current_window != eval_window:
                     if self.is_master:
@@ -1512,25 +1568,6 @@ class Validator(BaseNode, Trainer):
                 # Synchronize all ranks after gradient validation
                 dist_helper.safe_barrier("post_grad_validate", self.local_rank)
 
-                # Clear GPU memory before evaluation to prevent OOM
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-                    # Add memory check and force garbage collection
-                    import gc
-                    gc.collect()
-                    # Log memory usage for debugging
-                    if self.is_master:
-                        memory_allocated = torch.cuda.memory_allocated() / 1024**3
-                        memory_reserved = torch.cuda.memory_reserved() / 1024**3
-                        tplr.log_with_context(
-                            level="debug",
-                            message=f"GPU memory before eval UID {eval_uid} - Allocated: {memory_allocated:.2f}GB, Reserved: {memory_reserved:.2f}GB",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
-
                 # Loss before own data
                 eval_ok_local = True
                 try:
@@ -1538,20 +1575,6 @@ class Validator(BaseNode, Trainer):
                     loss_before_own, n_batches = await self.evaluate_model(
                         self.model, self.loader
                     )
-                except torch.cuda.OutOfMemoryError as e:
-                    eval_ok_local = False
-                    if self.is_master:
-                        tplr.log_with_context(
-                            level="error",
-                            message=f"CUDA OOM during own/before evaluation for UID {eval_uid}: {e}. Attempting cleanup.",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
-                    # Aggressive memory cleanup
-                    torch.cuda.empty_cache()
-                    import gc
-                    gc.collect()
                 except Exception as e:
                     eval_ok_local = False
                     tplr.log_with_context(
@@ -1641,14 +1664,6 @@ class Validator(BaseNode, Trainer):
                 # Synchronize all ranks after gradient application
                 dist_helper.safe_barrier("post_apply_grad_uid", self.local_rank)
 
-                # Clear GPU memory before evaluation to prevent OOM
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-                    # Add memory check and force garbage collection
-                    import gc
-                    gc.collect()
-
                 # 10. Compute loss after gradient application on own data
                 self.outer_optimizer.zero_grad()
                 self.model.zero_grad()
@@ -1658,20 +1673,6 @@ class Validator(BaseNode, Trainer):
                     loss_after_own, n_batches = await self.evaluate_model(
                         self.model, self.loader
                     )
-                except torch.cuda.OutOfMemoryError as e:
-                    eval_ok_local = False
-                    if self.is_master:
-                        tplr.log_with_context(
-                            level="error",
-                            message=f"CUDA OOM during own/after evaluation for UID {eval_uid}: {e}. Attempting cleanup.",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
-                    # Aggressive memory cleanup
-                    torch.cuda.empty_cache()
-                    import gc
-                    gc.collect()
                 except Exception as e:
                     eval_ok_local = False
                     tplr.log_with_context(
@@ -1742,14 +1743,6 @@ class Validator(BaseNode, Trainer):
                 self.outer_optimizer.zero_grad()
                 self.model.zero_grad()
 
-                # Clear GPU memory before evaluation to prevent OOM
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-                    # Add memory check and force garbage collection
-                    import gc
-                    gc.collect()
-
                 self.sampler.set_window_uid(random_seed, self.sync_window)
                 eval_ok_local = True
                 try:
@@ -1757,20 +1750,6 @@ class Validator(BaseNode, Trainer):
                         self.model,
                         self.loader,
                     )
-                except torch.cuda.OutOfMemoryError as e:
-                    eval_ok_local = False
-                    if self.is_master:
-                        tplr.log_with_context(
-                            level="error",
-                            message=f"CUDA OOM during random/after evaluation for UID {eval_uid}: {e}. Attempting cleanup.",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
-                    # Aggressive memory cleanup
-                    torch.cuda.empty_cache()
-                    import gc
-                    gc.collect()
                 except Exception as e:
                     eval_ok_local = False
                     tplr.log_with_context(
@@ -1868,6 +1847,9 @@ class Validator(BaseNode, Trainer):
                         eval_uid=eval_uid,
                     )
 
+                    # Track negative evaluation history
+                    self.track_negative_evaluation(eval_uid)
+
                 # Initialize or update OpenSkill rating for this peer
                 if eval_uid not in self.openskill_ratings and self.is_master:
                     self.openskill_ratings[eval_uid] = self.openskill_model.rating(
@@ -1908,12 +1890,11 @@ class Validator(BaseNode, Trainer):
                     # new_avg = (1-alpha) * old_avg + alpha * new_value
                     # where alpha is binary_score_ma_alpha hyperparameter
                     self.binary_moving_averages[eval_uid] = (
-                        1 - self.hparams.binary_score_ma_alpha
-                    ) * self.binary_moving_averages[
-                        eval_uid
-                    ] + self.hparams.binary_score_ma_alpha * self.binary_indicator_scores[
-                        eval_uid
-                    ]
+                        (1 - self.hparams.binary_score_ma_alpha)
+                        * self.binary_moving_averages[eval_uid]
+                        + self.hparams.binary_score_ma_alpha
+                        * self.binary_indicator_scores[eval_uid]
+                    )
                     tplr.log_with_context(
                         level="debug",
                         message=f"Binary Moving Average Score: {self.binary_moving_averages[eval_uid]}",
@@ -1948,17 +1929,9 @@ class Validator(BaseNode, Trainer):
 
                 # Synchronize all ranks at the end of each evaluation iteration
                 dist_helper.safe_barrier("end_eval_iter", self.local_rank)
-                
-                # Force memory cleanup after each UID evaluation
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
 
             del saved_state
             torch.cuda.empty_cache()
-            # Add garbage collection for Python objects
-            import gc
-            gc.collect()
             self.sampler._cached_indices.clear()
 
             # Update eval_peers counters based on actual evaluation attempts
@@ -2031,6 +2004,9 @@ class Validator(BaseNode, Trainer):
             # 14. Now, merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
             update_start = tplr.T()
+
+            # Only perform outer step if we have gradients to apply
+            # We already checked skip_window above, so we know we should update
             self.outer_optimizer.zero_grad()
             self.model.zero_grad()
 
@@ -2049,6 +2025,8 @@ class Validator(BaseNode, Trainer):
                 wandb_run=self.wandb if self.is_master else None,
                 global_step=self.global_step,
             )
+            self.global_step += 1  # Increment only when we actually do an outer step
+            tplr.logger.info(f"Applied outer step #{self.global_step}")
 
             # Add barrier after model update to ensure all ranks complete the update
             tplr.log_with_context(
@@ -2267,7 +2245,7 @@ class Validator(BaseNode, Trainer):
                     "validator/network/evaluated_uids": len(self.evaluated_uids),
                     "validator/optimizer/outer_lr": self.lr,
                     "validator/optimizer/inner_lr": current_inner_lr,
-                    "validator/network/active_miners": len(self.valid_score_indices),
+                    "validator/network/active_miners": len(self.comms.active_peers),
                     "validator/gather/success_rate": success_rate * 100,
                     "validator/timing/window_total": window_total_time,
                     "validator/timing/peer_update": peer_update_time,
@@ -2314,7 +2292,7 @@ class Validator(BaseNode, Trainer):
                         "evaluated_uids_count": int(len(self.evaluated_uids)),
                         "outer_lr": float(self.lr),
                         "inner_lr": float(current_inner_lr),
-                        "active_miners_count": int(len(self.valid_score_indices)),
+                        "active_miners_count": int(len(self.comms.active_peers)),
                         "gather_success_rate": gather_success_rate,
                         "window_total_time": float(window_total_time),
                         "peer_update_time": float(peer_update_time),
@@ -2365,44 +2343,26 @@ class Validator(BaseNode, Trainer):
                     current_window=self.current_window,
                 )
 
-                try:
-                    # Check memory before FSDP checkpoint save
-                    self._check_memory_and_cleanup(operation="FSDP_checkpoint_save")
-                    
-                    handle = await self.ckpt.save_local_async(
-                        model=self.model,
-                        window=self.sync_window,
-                        sync_window=self.sync_window,
-                        topology="FSDP",
-                    )
+                handle = await self.ckpt.save_local_async(
+                    model=self.model,
+                    window=self.sync_window,
+                    sync_window=self.sync_window,
+                    global_step=self.global_step,
+                    topology="FSDP",
+                )
 
-                    # Schedule an upload that will wait for the save to finish, then upload in background
-                    await self.ckpt.upload(
-                        window=self.sync_window,
-                        background=True,
-                        delete_local_on_success=True,
-                        wait_for=handle,
-                    )
-                    
-                    # Clean up after checkpoint save
-                    torch.cuda.empty_cache()
-                    
-                except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
-                    if "CUDA out of memory" in str(e) or "NCCL" in str(e):
-                        tplr.logger.warning(f"CUDA/NCCL error during FSDP checkpoint save at step {self.global_step}: {e}")
-                        # Force memory cleanup and continue
-                        torch.cuda.empty_cache()
-                        if torch.cuda.is_available():
-                            torch.cuda.synchronize()
-                        tplr.logger.info("Continuing without checkpoint save due to memory/NCCL constraints")
-                    else:
-                        raise
+                # Schedule an upload that will wait for the save to finish, then upload in background
+                await self.ckpt.upload(
+                    window=self.sync_window,
+                    background=True,
+                    delete_local_on_success=True,
+                    wait_for=handle,
+                )
 
             # Synchronize all ranks before moving to next window
             dist_helper.safe_barrier("pre_next_window", self.local_rank)
 
-            # 19. Increment global step
-            self.global_step += 1
+            # 19. Global step is now incremented only in the outer_step block
 
             torch.cuda.empty_cache()
 
@@ -2639,9 +2599,9 @@ class Validator(BaseNode, Trainer):
             old_score = self.final_scores[uid].item()
             new_score = old_score  # Initialize new_score with old_score value
             if self.final_scores[uid] > 0:
-                self.final_scores[
-                    uid
-                ] *= 0.75  # Apply flat 25% reduction for positive scores only
+                self.final_scores[uid] *= (
+                    0.75  # Apply flat 25% reduction for positive scores only
+                )
 
                 new_score = self.final_scores[uid].item()
 
@@ -3128,48 +3088,56 @@ class Validator(BaseNode, Trainer):
                     and vals is not None
                     and quant_params is not None
                 ):
-                    if clip_norm:
-                        quant_params = None  # Fast route for decompress
+                    try:
+                        if clip_norm:
+                            quant_params = None  # Fast route for decompress
 
-                    # Check if we're in distributed mode
-                    # Use empty_like to avoid copying the param; just provide dtype/device/shape
-                    ref = torch.empty_like(p, device=self.device, dtype=p.dtype)
+                        # Check if we're in distributed mode
+                        # Use empty_like to avoid copying the param; just provide dtype/device/shape
+                        ref = torch.empty_like(p, device=self.device, dtype=p.dtype)
 
-                    decompressed = self.compressor.decompress(
-                        ref,
-                        idxs,
-                        vals,
-                        self.xshapes[n],
-                        self.totalks[n],
-                        quant_params,
-                    )
+                        decompressed = self.compressor.decompress(
+                            ref,
+                            idxs,
+                            vals,
+                            self.xshapes[n],
+                            self.totalks[n],
+                            cast("QuantParamsT | None", quant_params),
+                        )
 
-                    full_grad_src = self.transformer.decode(
-                        decompressed, use_dct=self.hparams.use_dct
-                    )
-                    # Single conversion to target dtype+device to avoid extra temporaries
-                    full_grad_src = full_grad_src.to(
-                        dtype=p.dtype, device=p.device, non_blocking=True
-                    )
+                        full_grad_src = self.transformer.decode(
+                            decompressed, use_dct=self.hparams.use_dct
+                        )
+                        # Single conversion to target dtype+device to avoid extra temporaries
+                        full_grad_src = full_grad_src.to(
+                            dtype=p.dtype, device=p.device, non_blocking=True
+                        )
 
-                    # Free intermediate pieces ASAP
-                    del ref, decompressed
-                    # Force immediate cleanup
-                    torch.cuda.empty_cache()
+                        # Free intermediate pieces ASAP
+                        del ref, decompressed
 
-                    # Final safety check on the gradient itself
-                    if (
-                        torch.isnan(full_grad_src).any()
-                        or torch.isinf(full_grad_src).any()
-                    ):
+                        # Final safety check on the gradient itself
+                        if (
+                            torch.isnan(full_grad_src).any()
+                            or torch.isinf(full_grad_src).any()
+                        ):
+                            tplr.log_with_context(
+                                level="warning",
+                                message=f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                                eval_uid=eval_uid,
+                            )
+                            del full_grad_src
+                            has_valid_gradient = False
+                    except Exception as e:
                         tplr.log_with_context(
-                            level="warning",
-                            message=f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}",
+                            level="error",
+                            message=f"Failed to decompress/decode gradient for {n}: {e}",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
                             eval_uid=eval_uid,
                         )
-                        del full_grad_src
                         has_valid_gradient = False
 
             # Broadcast gradient validity to all ranks immediately
@@ -3207,8 +3175,6 @@ class Validator(BaseNode, Trainer):
                 if on_src:
                     del full_grad_src
                     full_grad_src = None
-                    # Force cleanup of large tensors
-                    torch.cuda.empty_cache()
 
                 # quick sanity (view, no extra big alloc)
                 local_view = new_grad.to_local()
@@ -3297,7 +3263,10 @@ class Validator(BaseNode, Trainer):
         }
 
     async def save_state(self):
-        """Saves the current validator state to disk asynchronously."""
+        """Saves the current validator state to disk asynchronously (master rank only)."""
+        if not self.is_master:
+            return
+
         try:
             tplr.log_with_context(
                 level="info",
@@ -3312,7 +3281,7 @@ class Validator(BaseNode, Trainer):
             )
 
     def load_state(self):
-        """Loads the validator state from disk.
+        """Loads the validator state from disk (master rank only).
 
         This method deserializes the validator's state from the configured state path
         and updates the validator's internal state variables. The state includes:
@@ -3333,6 +3302,9 @@ class Validator(BaseNode, Trainer):
         All tensors are converted to float and moved to the configured device.
         Exceptions during loading are caught and logged as warnings.
         """
+        if not self.is_master:
+            return
+
         tplr.logger.info("Loading validator state")
 
         # ── stage 1: read file ─────────────────────────────────────────────
@@ -3383,104 +3355,6 @@ class Validator(BaseNode, Trainer):
             )
         except Exception as e:
             tplr.logger.warning(f"Failed to restore OpenSkill ratings: {e}")
-
-    async def load_checkpoint(self) -> None:
-        checkpoint_window_buffer = 5
-        has_new_checkpoint = (
-            self.global_step
-            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
-        )
-        
-        # Clear GPU memory before checkpoint loading to prevent OOM during NCCL operations
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-            import gc
-            gc.collect()
-            
-        # Check memory before checkpoint loading
-        if not self._check_memory_and_cleanup("before_checkpoint_load"):
-            tplr.logger.error("Insufficient memory for checkpoint loading. Cannot proceed.")
-            raise RuntimeError("Insufficient GPU memory for checkpoint loading")
-            
-        # Proceed to load checkpoint
-        #   • rank-0 (or single-GPU run) downloads & catches-up
-        #   • remaining ranks receive state via NCCL broadcast
-        try:
-            ckpt_sync_win = await self.ckpt.download_and_load(
-                model=self.model,
-                window=None,  # latest
-                shared_fs=True,
-                process_group=None,
-                prefer_highest_staked=True,
-            )
-        except Exception as e:
-            # If checkpoint loading fails due to memory, try to recover
-            if "out of memory" in str(e).lower() or "nccl" in str(e).lower():
-                tplr.logger.error(f"Checkpoint loading failed due to memory/NCCL error: {e}. Attempting recovery.")
-                # Aggressive cleanup
-                torch.cuda.empty_cache()
-                import gc
-                gc.collect()
-                torch.cuda.synchronize()
-                # Try one more time
-                try:
-                    ckpt_sync_win = await self.ckpt.download_and_load(
-                        model=self.model,
-                        window=None,  # latest
-                        shared_fs=True,
-                        process_group=None,
-                        prefer_highest_staked=True,
-                    )
-                except Exception as retry_e:
-                    tplr.logger.error(f"Checkpoint loading failed again after cleanup: {retry_e}")
-                    # Set to None to indicate no checkpoint loaded
-                    ckpt_sync_win = None
-            else:
-                # Re-raise other types of errors
-                raise e
-                
-        ckpt_ok = ckpt_sync_win is not None
-
-        # Clear memory after checkpoint loading
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        assert self.start_window is not None
-        if ckpt_ok:
-            tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
-        else:
-            tplr.logger.info("No checkpoint found – starting from scratch")
-
-        # Decide catch-up windows and run catch-up on ALL ranks (avoids DTensor collective hangs)
-        need_catchup = (not ckpt_ok) or (
-            ckpt_ok
-            and ckpt_sync_win < self.current_window
-            and self.global_step > checkpoint_window_buffer
-        )
-
-        if need_catchup:
-            start_from = (
-                self.start_window
-                if not ckpt_ok
-                else max(ckpt_sync_win, self.start_window)
-            )
-            tplr.logger.info(
-                f"Checkpoint is behind current window ({ckpt_sync_win} < {self.current_window}), starting catchup..."
-            )
-            await tplr.neurons.catchup_with_aggregation_server(self, start_from)
-        else:
-            tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
-
-        # Replay scheduler steps if checkpoint was loaded
-        if ckpt_ok:
-            steps_to_replay = (
-                ckpt_sync_win - self.start_window + 1
-            ) * self.hparams.inner_steps
-            for _ in range(steps_to_replay):
-                self.inner_scheduler.step()
-
-        return
 
     def bin_evaluation_peers(self, num_bins: int) -> dict[int, list[int]]:
         """

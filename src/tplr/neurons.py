@@ -650,6 +650,7 @@ async def handle_checkpoint_catchup(
     ckpt_sync_win: int,
     ckpt_global_step: int,
     from_bootstrap: bool,
+    aggregator_device: str | None = None,
 ) -> None:
     """
     Handle catch-up logic after checkpoint loading and replay scheduler steps.
@@ -660,6 +661,7 @@ async def handle_checkpoint_catchup(
         ckpt_sync_win: Window number from checkpoint
         ckpt_global_step: Global step from checkpoint
         from_bootstrap: Whether checkpoint was from bootstrap version
+        aggregator_device: which device to load aggregation results to
     """
     # Decide catch-up windows and run catch-up on ALL ranks
     # When loading from bootstrap, we always need to catch up from start_window
@@ -674,7 +676,9 @@ async def handle_checkpoint_catchup(
             f"Loaded bootstrap checkpoint, catching up from start_window "
             f"{instance.start_window} to {instance.current_window}"
         )
-        await catchup_with_aggregation_server(instance, instance.start_window)
+        await catchup_with_aggregation_server(
+            instance, instance.start_window, aggregator_device=aggregator_device
+        )
     elif ckpt_sync_win < instance.current_window:
         # Current version checkpoint is behind, catch up from checkpoint window
         catch_up_start = max(ckpt_sync_win, instance.start_window)
@@ -702,7 +706,9 @@ async def handle_checkpoint_catchup(
 
 
 async def catchup_with_aggregation_server(
-    instance: NeuronT, checkpoint_current_window: int
+    instance: NeuronT,
+    checkpoint_current_window: int,
+    aggregator_device: str | None = None,
 ) -> None:
     """
     Synchronise the local model with the chain with memory optimizations.
@@ -728,6 +734,11 @@ async def catchup_with_aggregation_server(
         "Starting catch‑up using aggregated_gradients with memory optimization..."
     )
     assert instance.start_window is not None
+
+    # Use provided device or default to instance's device
+    catchup_device = (
+        aggregator_device if aggregator_device is not None else instance.config.device
+    )
 
     def log_memory_usage(prefix: str):
         """Log current memory usage statistics."""
@@ -814,6 +825,7 @@ async def catchup_with_aggregation_server(
                 timeout=60,
                 local=False,
                 stale_retention=10,
+                map_location=catchup_device,
             )
 
             # ── A. aggregated object exists → normal path ────────────────────
@@ -869,7 +881,7 @@ async def catchup_with_aggregation_server(
                         window=start_w,
                         key="gradient",
                         timeout=45,
-                        device=str(instance.config.device),
+                        device=str(catchup_device),
                         local=False,
                         stale_retention=10,
                         totalks=instance.totalks,

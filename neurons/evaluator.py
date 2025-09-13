@@ -752,7 +752,7 @@ class Evaluator:
                 )
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    logits = self.model(input_ids)
+                    logits = self.model(input_ids, labels)
 
                 loss = cross_entropy_loss(logits, labels)
                 num_tokens = (labels != -100).sum().item()

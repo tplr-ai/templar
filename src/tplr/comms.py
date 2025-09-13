@@ -1382,6 +1382,7 @@ class Comms(ChainManager):
         time_min: datetime | None = None,
         time_max: datetime | None = None,
         show_progress: bool = True,
+        map_location: str | None = None,
     ) -> CommsGetResult:
         """
         Retrieves an object from storage, either locally or from a remote S3 bucket.
@@ -1403,6 +1404,8 @@ class Comms(ChainManager):
                 object. If the object is older, it's skipped. Defaults to None.
             time_max (datetime | None, optional): The maximum modification time for the
                 object. If the object is newer, it's skipped. Defaults to None.
+            map_location (str | None, optional): Device to map tensors to when loading PyTorch files.
+                If None, defaults to self.config.device. Use "cpu" to avoid GPU OOM. Defaults to None.
 
         Returns:
             CommsGetResult: An object containing the status of the operation and the
@@ -1456,6 +1459,7 @@ class Comms(ChainManager):
                 time_min=time_min,
                 time_max=time_max,
                 show_progress=show_progress,
+                map_location=map_location,
             )
 
             if loaded_data is None:

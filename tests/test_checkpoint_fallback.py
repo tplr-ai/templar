@@ -278,7 +278,7 @@ class TestHandleCheckpointCatchup:
 
             # Verify - should catch up from start_window (not checkpoint window)
             mock_catchup.assert_called_once_with(
-                mock_instance, mock_instance.start_window
+                mock_instance, mock_instance.start_window, aggregator_device=None
             )
 
             # Should replay scheduler steps: 10 * 30 = 300

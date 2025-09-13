@@ -984,7 +984,12 @@ class Validator(BaseNode, Trainer):
 
         # Handle catch-up and scheduler replay using consolidated logic
         await tplr.neurons.handle_checkpoint_catchup(
-            self, ckpt_ok, ckpt_sync_win, ckpt_global_step, from_bootstrap
+            self,
+            ckpt_ok,
+            ckpt_sync_win,
+            ckpt_global_step,
+            from_bootstrap,
+            aggregator_device="cpu",
         )
 
         current_shard = self.global_step // self.outer_steps_per_shard

@@ -216,6 +216,10 @@ class Evaluator:
         # Core configuration
         self.netuid = config.netuid
         self.version = config.version or tplr.__version__
+        tplr.__version__ = self.version
+        tplr.logger.info(
+            f"Running evaluations for {self.version = }. Setting tplr version to {tplr.__version__}"
+        )
         self.eval_interval = config.eval_interval
 
         # Backfill & control flags
@@ -271,6 +275,7 @@ class Evaluator:
                 role="evaluator",
                 group="evaluations",
                 job_type="eval",
+                version=self.version,
             )
         else:
             self.wandb = NullMetricsLogger()
@@ -1102,7 +1107,7 @@ class Evaluator:
 
         # Get the start window for global_step calculation (master fetches, then broadcasts)
         if self.is_master:
-            start_window = await self.comms.get_start_window()
+            start_window = await self.comms.get_start_window(version=self.version)
             assert start_window is not None
             self.start_window = start_window
 

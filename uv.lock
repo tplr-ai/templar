@@ -3779,7 +3779,7 @@ wheels = [
 [[package]]
 name = "torchtitan"
 version = "0.1.0"
-source = { git = "https://github.com/tplr-ai/torchtitan?branch=templar-main#a25a978c7a5392d58a8e7e47bb367fa59e46cb69" }
+source = { git = "https://github.com/one-covenant/torchtitan?branch=templar-main#a25a978c7a5392d58a8e7e47bb367fa59e46cb69" }
 dependencies = [
     { name = "datasets" },
     { name = "fsspec" },
@@ -3898,7 +3898,7 @@ requires-dist = [
     { name = "scipy" },
     { name = "seaborn", marker = "extra == 'dev'" },
     { name = "torch", specifier = ">=2.7.1" },
-    { name = "torchtitan", git = "https://github.com/tplr-ai/torchtitan?branch=templar-main" },
+    { name = "torchtitan", git = "https://github.com/one-covenant/torchtitan?branch=templar-main" },
     { name = "transformers" },
     { name = "uvloop", specifier = ">=0.21.0" },
     { name = "wandb" },

@@ -94,7 +94,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 3. **Clone the Repository**:
 
    ```bash
-   git clone https://github.com/tplr-ai/templar.git
+   git clone https://github.com/one-covenant/templar.git
    cd templar
    ```
 

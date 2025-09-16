@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: tplr-ai/templar
+  IMAGE_NAME: one-covenant/templar
 
 jobs:
   build-and-push:

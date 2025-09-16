@@ -1,6 +1,6 @@
 services:
   evaluator:
-    image: ghcr.io/tplr-ai/templar:latest
+    image: ghcr.io/one-covenant/templar:latest
     container_name: templar-evaluator
     restart: unless-stopped
     entrypoint: ["/bin/bash", "-c", "sleep 5; uv run scripts/evaluator.py --device=cuda:0 --tasks=arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag,mmlu,mmlu_flan_n_shot_generative"]

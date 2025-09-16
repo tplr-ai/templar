@@ -13,10 +13,10 @@ __|__ _  _ _  _ | _  _
 </div>
 
 <div align="center">
-Documentation: <a href="https://github.com/tplr-ai/templar/blob/main/docs/miner.md">Miner</a> • <a href="https://github.com/tplr-ai/templar/blob/main/docs/validator.md">Validator</a>
+Documentation: <a href="https://github.com/one-covenant/templar/blob/main/docs/miner.md">Miner</a> • <a href="https://github.com/one-covenant/templar/blob/main/docs/validator.md">Validator</a>
 </div>
 <p align="center">
-  <a href="https://github.com/tplr-ai/templar/actions/workflows/ci.yml"><img src="https://github.com/tplr-ai/templar/actions/workflows/ci.yml/badge.svg" alt="CI" style="border: none;" /></a><a href="https://codecov.io/gh/tplr-ai/templar"><img src="https://codecov.io/gh/tplr-ai/templar/branch/main/graph/badge.svg" alt="Codecov" style="border: none;" /></a><a href="https://github.com/tplr-ai/templar/blob/main/LICENSE"><img src="https://img.shields.io/github/license/tplr-ai/templar" alt="License" style="border: none;" /></a><a href="https://github.com/tplr-ai/templar/commits/main"><img src="https://img.shields.io/github/last-commit/tplr-ai/templar" alt="Last Commit" style="border: none;" /></a><a href="https://deepwiki.com/tplr-ai/templar"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" style="border: none;" /></a>
+  <a href="https://github.com/one-covenant/templar/actions/workflows/ci.yml"><img src="https://github.com/one-covenant/templar/actions/workflows/ci.yml/badge.svg" alt="CI" style="border: none;" /></a><a href="https://codecov.io/gh/one-covenant/templar"><img src="https://codecov.io/gh/one-covenant/templar/branch/main/graph/badge.svg" alt="Codecov" style="border: none;" /></a><a href="https://github.com/one-covenant/templar/blob/main/LICENSE"><img src="https://img.shields.io/github/license/one-covenant/templar" alt="License" style="border: none;" /></a><a href="https://github.com/one-covenant/templar/commits/main"><img src="https://img.shields.io/github/last-commit/one-covenant/templar" alt="Last Commit" style="border: none;" /></a><a href="https://deepwiki.com/one-covenant/templar"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" style="border: none;" /></a>
 </p>
 
 ## Introduction

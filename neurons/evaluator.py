@@ -883,12 +883,18 @@ class Evaluator:
         # Load checkpoint if not baseline
         if not is_baseline and window > 0:
             try:
+                tplr.logger.info(
+                    f"[Rank {self.rank}] About to call download_and_load for window {window}"
+                )
                 res = await self.ckpt.download_and_load(
                     model=self.model,
                     window=window,
                     shared_fs=True,
                     process_group=None,
                     prefer_highest_staked=True,
+                )
+                tplr.logger.info(
+                    f"[Rank {self.rank}] download_and_load completed for window {window}, res={res}"
                 )
 
                 if res is None:
@@ -1040,32 +1046,86 @@ class Evaluator:
         assert self.from_window is not None or self.to_window is not None, (
             "backfill_range called without bounds"
         )
+        tplr.logger.info(f"[Rank {self.rank}] Starting backfill_range")
 
-        # Resolve bounds (master computes, broadcasts below)
+        # Ensure all ranks are synchronized before starting
+        dist_helper.safe_barrier(tag="backfill_start", local_rank=self.local_rank)
+        tplr.logger.info(f"[Rank {self.rank}] All ranks synchronized for backfill")
+
+        # Resolve bounds (master computes, all ranks participate in broadcast)
         if self.is_master:
             resolved_from = (
                 self.from_window if self.from_window is not None else self.start_window
             )
             resolved_to = self.to_window
-            if resolved_to is None:
-                resolved_to = await self._resolve_to_window()
         else:
             resolved_from = None
             resolved_to = None
 
+        # All ranks must participate in _resolve_to_window if needed
+        if self.to_window is None:
+            resolved_to = await self._resolve_to_window()
+
+        if self.is_master:
+            tplr.logger.info(
+                f"[Master] Resolved bounds: from={resolved_from}, to={resolved_to}"
+            )
+            bounds = torch.tensor(
+                [
+                    -1 if resolved_from is None else int(resolved_from),
+                    -1 if resolved_to is None else int(resolved_to),
+                ],
+                dtype=torch.int64,
+                device=self.device,
+            )
+            tplr.logger.info(f"[Master] Created bounds tensor on device: {self.device}")
+        else:
+            tplr.logger.info(
+                f"[Rank {self.rank}] Waiting for bounds broadcast, device: {self.device}"
+            )
+            bounds = torch.zeros(
+                2,
+                dtype=torch.int64,
+                device=self.device,
+            )
+
         # Broadcast both bounds
-        bounds = torch.tensor(
-            [
-                -1 if resolved_from is None else int(resolved_from),
-                -1 if resolved_to is None else int(resolved_to),
-            ],
-            dtype=torch.int64,
-            device=self.device if self.device != "cpu" else "cpu",
+        tplr.logger.info(f"[Rank {self.rank}] About to broadcast bounds")
+
+        # Debug: try to access tensor properties separately
+        try:
+            device = bounds.device
+            tplr.logger.info(f"[Rank {self.rank}] Tensor device: {device}")
+        except Exception as e:
+            tplr.logger.error(f"[Rank {self.rank}] Error accessing device: {e}")
+
+        # Ensure all ranks are ready for broadcast
+        dist_helper.safe_barrier(
+            tag="before_bounds_broadcast", local_rank=self.local_rank
         )
+        tplr.logger.info(f"[Rank {self.rank}] All ranks ready for broadcast")
+
+        import time
+
+        start_time = time.time()
+        tplr.logger.info(f"[Rank {self.rank}] Calling dist_helper.broadcast now")
         dist_helper.broadcast(bounds, src=0)
+        tplr.logger.info(f"[Rank {self.rank}] Returned from dist_helper.broadcast")
+        tplr.logger.info(
+            f"[Rank {self.rank}] Bounds tensor shape: {bounds.shape}, device: {bounds.device}"
+        )
+        elapsed = time.time() - start_time
+        tplr.logger.info(f"[Rank {self.rank}] Broadcast completed in {elapsed:.2f}s")
         resolved_from, resolved_to = [
             None if int(v.item()) < 0 else int(v.item()) for v in bounds
         ]
+        tplr.logger.info(
+            f"[Rank {self.rank}] After broadcast: resolved_from={resolved_from}, resolved_to={resolved_to}"
+        )
+
+        # Ensure all ranks have received and processed the bounds before continuing
+        dist_helper.safe_barrier(tag="bounds_received", local_rank=self.local_rank)
+        tplr.logger.info(f"[Rank {self.rank}] All ranks have bounds")
 
         if resolved_from is None or resolved_to is None:
             if self.is_master:
@@ -1084,37 +1144,60 @@ class Evaluator:
             )
 
         for w in range(resolved_from, resolved_to + 1):
+            tplr.logger.info(
+                f"[Rank {self.rank}] Processing window {w} in backfill loop"
+            )
+
             # Master checks completeness and broadcasts result
             if self.is_master:
+                tplr.logger.info(
+                    f"[Master] Checking if checkpoint exists for window {w}"
+                )
                 ready = await self.ckpt.check_checkpoint_exists(window=w)
+                tplr.logger.info(f"[Master] Checkpoint exists for window {w}: {ready}")
                 ready_tensor = torch.tensor(
-                    [1 if ready else 0], 
-                    dtype=torch.int64, 
-                    device=self.device if self.device != "cpu" else "cpu"
+                    [1 if ready else 0],
+                    dtype=torch.int64,
+                    device=self.device if self.device != "cpu" else "cpu",
                 )
             else:
+                tplr.logger.info(
+                    f"[Rank {self.rank}] Waiting for checkpoint existence broadcast for window {w}"
+                )
                 # Non-master ranks prepare empty tensor for broadcast
                 ready_tensor = torch.zeros(
-                    1, 
-                    dtype=torch.int64, 
-                    device=self.device if self.device != "cpu" else "cpu"
+                    1,
+                    dtype=torch.int64,
+                    device=self.device if self.device != "cpu" else "cpu",
                 )
-            
+
             # Broadcast checkpoint readiness from master to all ranks
+            tplr.logger.info(
+                f"[Rank {self.rank}] Broadcasting checkpoint readiness for window {w}"
+            )
             dist_helper.broadcast(ready_tensor, src=0)
             ready = bool(ready_tensor.item())
-            
+            tplr.logger.info(
+                f"[Rank {self.rank}] Received broadcast result for window {w}: ready={ready}"
+            )
+
             if not ready:
                 if self.is_master:
                     tplr.logger.info(
                         f"[Master] Skip window {w}: checkpoint not complete/available"
                     )
+                tplr.logger.info(f"[Rank {self.rank}] Skipping window {w} (not ready)")
                 continue
-            
+
+            tplr.logger.info(f"[Rank {self.rank}] Starting evaluation for window {w}")
             await self.evaluate_window(w)
+            tplr.logger.info(
+                f"[Rank {self.rank}] Completed evaluation for window {w}, entering barrier"
+            )
             dist_helper.safe_barrier(
                 tag=f"backfill_win_{w}", local_rank=self.local_rank
             )
+            tplr.logger.info(f"[Rank {self.rank}] Exited barrier for window {w}")
 
     async def run(self):
         """Main evaluation loop."""
@@ -1180,9 +1263,15 @@ class Evaluator:
         #  - evaluate all READY checkpoints in the inclusive range
         #  - exit immediately if --no_follow was passed
         if self.from_window is not None or self.to_window is not None:
-            if self.is_master:
-                tplr.logger.info("[Master] Entering backfill mode")
+            tplr.logger.info(f"[Rank {self.rank}] Entering backfill mode")
+            dist_helper.safe_barrier(
+                tag="before_backfill_range", local_rank=self.local_rank
+            )
+            tplr.logger.info(
+                f"[Rank {self.rank}] All ranks ready to start backfill_range"
+            )
             await self.backfill_range()
+            tplr.logger.info(f"[Rank {self.rank}] Exited backfill_range")
 
             if self.no_follow:
                 if self.is_master:

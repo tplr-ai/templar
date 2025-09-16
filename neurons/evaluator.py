@@ -238,6 +238,7 @@ class Evaluator:
         self.world_size = dist_helper.world_size
         self.local_rank = dist_helper.local_rank
         self.is_master = dist_helper.is_master
+        assert dist_helper.device is not None
         self.device = dist_helper.device
 
         if self.world_size < 2:
@@ -1083,24 +1084,33 @@ class Evaluator:
             )
 
         for w in range(resolved_from, resolved_to + 1):
-            # Master checks completeness, all ranks agree on result
+            # Master checks completeness and broadcasts result
             if self.is_master:
                 ready = await self.ckpt.check_checkpoint_exists(window=w)
+                ready_tensor = torch.tensor(
+                    [1 if ready else 0], 
+                    dtype=torch.int64, 
+                    device=self.device if self.device != "cpu" else "cpu"
+                )
             else:
-                ready = True  # Non-master ranks default to True, will follow master's decision
-
-            # All ranks synchronize on checkpoint readiness
-            ready = dist_helper.all_agree(
-                ready, device=self.device, tag=f"checkpoint_ready_w{w}"
-            )
-
+                # Non-master ranks prepare empty tensor for broadcast
+                ready_tensor = torch.zeros(
+                    1, 
+                    dtype=torch.int64, 
+                    device=self.device if self.device != "cpu" else "cpu"
+                )
+            
+            # Broadcast checkpoint readiness from master to all ranks
+            dist_helper.broadcast(ready_tensor, src=0)
+            ready = bool(ready_tensor.item())
+            
             if not ready:
                 if self.is_master:
                     tplr.logger.info(
                         f"[Master] Skip window {w}: checkpoint not complete/available"
                     )
                 continue
-
+            
             await self.evaluate_window(w)
             dist_helper.safe_barrier(
                 tag=f"backfill_win_{w}", local_rank=self.local_rank

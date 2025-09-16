@@ -1083,14 +1083,24 @@ class Evaluator:
             )
 
         for w in range(resolved_from, resolved_to + 1):
-            # Check completeness (without downloading)
-            ready = await self.ckpt.check_checkpoint_exists(window=w)
+            # Master checks completeness, all ranks agree on result
+            if self.is_master:
+                ready = await self.ckpt.check_checkpoint_exists(window=w)
+            else:
+                ready = True  # Non-master ranks default to True, will follow master's decision
+
+            # All ranks synchronize on checkpoint readiness
+            ready = dist_helper.all_agree(
+                ready, device=self.device, tag=f"checkpoint_ready_w{w}"
+            )
+
             if not ready:
                 if self.is_master:
                     tplr.logger.info(
                         f"[Master] Skip window {w}: checkpoint not complete/available"
                     )
                 continue
+
             await self.evaluate_window(w)
             dist_helper.safe_barrier(
                 tag=f"backfill_win_{w}", local_rank=self.local_rank

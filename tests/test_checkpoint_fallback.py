@@ -252,7 +252,7 @@ class TestHandleCheckpointCatchup:
 
             # Verify - should catch up from start_window
             mock_catchup.assert_called_once_with(
-                mock_instance, mock_instance.start_window
+                mock_instance, mock_instance.start_window, aggregator_device=None
             )
 
             # No scheduler steps to replay when no checkpoint
@@ -305,7 +305,9 @@ class TestHandleCheckpointCatchup:
             )
 
             # Verify - should catch up from checkpoint window (120)
-            mock_catchup.assert_called_once_with(mock_instance, 120)
+            mock_catchup.assert_called_once_with(
+                mock_instance, 120, aggregator_device=None
+            )
 
             # Should replay scheduler steps: 20 * 30 = 600
             assert mock_instance.inner_scheduler.step.call_count == 600
@@ -356,7 +358,9 @@ class TestHandleCheckpointCatchup:
             )
 
             # Verify - should catch up from start_window (100), not checkpoint (90)
-            mock_catchup.assert_called_once_with(mock_instance, 100)
+            mock_catchup.assert_called_once_with(
+                mock_instance, 100, aggregator_device=None
+            )
 
             # Should replay scheduler steps: 5 * 30 = 150
             assert mock_instance.inner_scheduler.step.call_count == 150

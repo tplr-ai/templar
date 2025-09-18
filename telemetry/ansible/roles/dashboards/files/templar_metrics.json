@@ -46,9 +46,9 @@
       "tags": [],
       "targetBlank": true,
       "title": "Github",
-      "tooltip": "https://github.com/tplr-ai/templar",
+      "tooltip": "https://github.com/one-covenant/templar",
       "type": "link",
-      "url": "https://github.com/tplr-ai/templar"
+      "url": "https://github.com/one-covenant/templar"
     },
     {
       "asDropdown": false,

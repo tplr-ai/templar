@@ -1,6 +1,6 @@
 services:
   node:
-    image: ghcr.io/tplr-ai/templar:latest
+    image: ghcr.io/one-covenant/templar:latest
     container_name: templar-${NODE_TYPE:-miner}-${WALLET_HOTKEY}
     restart: unless-stopped
     runtime: nvidia
@@ -56,7 +56,7 @@ services:
       - "com.centurylinklabs.watchtower.enable=true"
 
   evaluator:
-    image: ghcr.io/tplr-ai/templar:latest
+    image: ghcr.io/one-covenant/templar:latest
     container_name: templar-evaluator
     restart: unless-stopped
     volumes:

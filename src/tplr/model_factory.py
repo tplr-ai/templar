@@ -458,13 +458,11 @@ def initialize_torchtitan_model(
         full_sd = get_model_state_dict(
             ref, options=StateDictOptions(full_state_dict=True)
         )
-        missing, unexpected = set_model_state_dict(
+        set_model_state_dict(
             model,
             full_sd,
             options=StateDictOptions(full_state_dict=True, strict=True),
         )
-        if missing or unexpected:
-            raise ValueError(f"Missing {missing}, unexpected {unexpected}")
 
     # Log initialization details
     if role == "miner":

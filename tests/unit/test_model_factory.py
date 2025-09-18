@@ -13,7 +13,9 @@ from tplr.model_factory import (
     _get_hf_config_from_titan,
     _get_unwrapped_model,
     convert_titan_to_hf,
+    create_job_config,
     create_parallel_dims,
+    get_titan_model_args,
     initialize_torchtitan_model,
 )
 
@@ -37,6 +39,20 @@ class TestModelFactory(unittest.TestCase):
     @classmethod
     def setUpClass(cls, *args, **kwargs):
         setup_distributed_environment()
+
+    def setUp(self):
+        self.hparams = SimpleNamespace(
+            model_size="150M",
+            sequence_length=1024,
+            model_config=SimpleNamespace(
+                hidden_size=768,
+                num_hidden_layers=12,
+                num_attention_heads=12,
+                vocab_size=50257,
+                intermediate_size=2048,
+            ),
+            torchtitan=SimpleNamespace(),
+        )
 
     @patch("torch.distributed.is_initialized", return_value=True)
     @patch("torch.distributed.get_world_size", return_value=1)
@@ -194,6 +210,36 @@ class TestModelFactory(unittest.TestCase):
             config = _get_hf_config_from_titan(titan_model, hparams, state_dict)
             self.assertIsInstance(config, LlamaConfig)
             self.assertEqual(config.vocab_size, 100)
+
+    def test_get_titan_model_args(self, mock_cuda_available, mock_set_device):
+        args = get_titan_model_args(self.hparams)
+        self.assertEqual(args.dim, 768)
+        self.assertEqual(args.n_layers, 12)
+
+    def test_create_job_config(self, mock_cuda_available, mock_set_device):
+        config = create_job_config(self.hparams)
+        self.assertIsNotNone(config)
+
+    @patch("tplr.model_factory.TitanLlama")
+    @patch("tplr.model_factory.parallelize_llama")
+    def test_initialize_torchtitan_model(
+        self, mock_parallelize, mock_llama, mock_cuda_available, mock_set_device
+    ):
+        # Configure the mock for TitanLlama instances
+        mock_titan_instance = MagicMock()
+        # Return a non-empty state dict to avoid the RuntimeError
+        mock_titan_instance.state_dict.return_value = {"dummy_key": torch.zeros(1)}
+        # The model created inside initialize_torchtitan_model will be this mock
+        mock_llama.return_value = mock_titan_instance
+
+        # The parallelized model will also be a mock
+        mock_parallelized_model = MagicMock()
+        mock_parallelize.return_value = mock_parallelized_model
+
+        model = initialize_torchtitan_model(self.hparams)
+
+        self.assertIsNotNone(model)
+        mock_parallelize.assert_called_once()
 
 
 class TestCreateParallelDims(unittest.TestCase):

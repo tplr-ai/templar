@@ -35,7 +35,7 @@ A Python utility to manage objects in Cloudflare R2 buckets with various deletio
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/tplr-ai/templar.git
+   git clone https://github.com/one-covenant/templar.git
    cd templar
    ```
 

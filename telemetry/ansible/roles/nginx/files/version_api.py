@@ -39,7 +39,7 @@ logging.basicConfig(
 logger = logging.getLogger("templar_version_api")
 
 # Configuration
-GITHUB_URL = "https://raw.githubusercontent.com/tplr-ai/templar/refs/heads/main/src/tplr/__init__.py"
+GITHUB_URL = "https://raw.githubusercontent.com/one-covenant/templar/refs/heads/main/src/tplr/__init__.py"
 CACHE_TTL = 60  # Cache version for 60 seconds
 PORT = 8585  # The port the API will run on
 

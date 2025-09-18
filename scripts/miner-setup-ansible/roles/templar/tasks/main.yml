@@ -19,7 +19,7 @@
 
 - name: Clone the templar repository into the workspace
   git:
-    repo: "https://github.com/tplr-ai/templar.git"
+    repo: "https://github.com/one-covenant/templar.git"
     dest: "{{ templar_dir }}"
     update: yes
     force: yes

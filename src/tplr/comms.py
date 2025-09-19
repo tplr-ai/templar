@@ -1499,6 +1499,7 @@ class Comms(ChainManager):
         time_min: datetime | None = None,
         time_max: datetime | None = None,
         show_progress: bool = False,
+        map_location: str | None = None,
     ) -> CommsGetResult | None:
         """
         Attempts to retrieve an object from storage with a retry mechanism.
@@ -1571,6 +1572,7 @@ class Comms(ChainManager):
                 time_min=time_min,
                 time_max=time_max,
                 show_progress=show_progress,
+                map_location=map_location,
             )
 
             if result.success:
@@ -1675,6 +1677,7 @@ class Comms(ChainManager):
                     stale_retention=stale_retention,
                     time_min=time_min,
                     time_max=time_max,
+                    map_location=device,
                 )
                 for uid in uids
             ]

@@ -499,6 +499,7 @@ class Validator(BaseNode, Trainer):
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         self.inactivity_slash_rate = 0.25  # 25% slash per window
         self.missing_gradient_slash_rate = 0.75
+        self.score_zero_threshold = 1e-4
         self.sync_score_slash_rate = 0.75
         self.idx_similarity_slashing_rate = (
             tplr.neurons.instantiate_slashing_multiplier()
@@ -2857,6 +2858,18 @@ class Validator(BaseNode, Trainer):
             self.final_scores[eval_uid] *= self.missing_gradient_slash_rate
             self.binary_moving_averages[eval_uid] *= self.missing_gradient_slash_rate
 
+            # Set to zero if score drops below threshold
+            score_threshold = self.score_zero_threshold
+            if self.final_scores[eval_uid] < score_threshold:
+                tplr.log_with_context(
+                    level="info",
+                    message=f"UID {eval_uid} final_score {self.final_scores[eval_uid]:.8f} below threshold {score_threshold:.8f}, setting to 0.0",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                    eval_uid=eval_uid,
+                )
+                self.final_scores[eval_uid] = 0.0
+
             new_score = self.final_scores[eval_uid].item()
             tplr.log_with_context(
                 level="info",
@@ -3697,6 +3710,17 @@ class Validator(BaseNode, Trainer):
                 if self.final_scores[uid] > 0:
                     self.final_scores[uid] *= gather_peers_slash_rate
                     self.binary_moving_averages[uid] *= gather_peers_slash_rate
+
+                    # Set to zero if score drops below threshold
+                    score_threshold = self.score_zero_threshold
+                    if self.final_scores[uid] < score_threshold:
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"UID {uid} final_score {self.final_scores[uid]:.8f} below threshold {score_threshold:.8f}, setting to 0.0",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                        )
+                        self.final_scores[uid] = 0.0
 
                     new_score = self.final_scores[uid].item()
                     tplr.log_with_context(

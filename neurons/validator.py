@@ -2857,7 +2857,7 @@ class Validator(BaseNode, Trainer):
         if self.final_scores[eval_uid] > 0:
             self.final_scores[eval_uid] *= self.missing_gradient_slash_rate
             self.binary_moving_averages[eval_uid] *= self.missing_gradient_slash_rate
-            
+
             # Set to zero if score drops below threshold
             score_threshold = self.score_zero_threshold
             if self.final_scores[eval_uid] < score_threshold:
@@ -3710,7 +3710,7 @@ class Validator(BaseNode, Trainer):
                 if self.final_scores[uid] > 0:
                     self.final_scores[uid] *= gather_peers_slash_rate
                     self.binary_moving_averages[uid] *= gather_peers_slash_rate
-                    
+
                     # Set to zero if score drops below threshold
                     score_threshold = self.score_zero_threshold
                     if self.final_scores[uid] < score_threshold:
